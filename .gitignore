@@ -1,0 +1,18 @@
+# Build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+artifacts/
+
+# Never commit keys or secrets
+*.key
+*.pem
+*.pfx
+*.snk
+.env
+.env.*
+apikey.dat
+secrets.*

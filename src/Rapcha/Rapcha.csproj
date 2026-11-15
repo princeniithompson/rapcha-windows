@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>Rapcha</AssemblyName>
+    <RootNamespace>Rapcha</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>true</Prefer32Bit>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\rapcha.ico</ApplicationIcon>
+    <StartupObject>Rapcha.Win.Program</StartupObject>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Product>Rapcha</Product>
+    <AssemblyTitle>Rapcha - voice typing for Windows</AssemblyTitle>
+    <Company>Prince Nii Thompson</Company>
+    <Copyright>Prince Nii Thompson</Copyright>
+    <Version>1.0.0</Version>
+    <Version Condition="'$(RAPCHA_BUILD)' != ''">1.0.$(RAPCHA_BUILD)</Version>
+    <DebugType>none</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\lifebuoy.png" LogicalName="Rapcha.lifebuoy.png" />
+    <EmbeddedResource Include="Assets\rapcha.ico" LogicalName="Rapcha.rapcha.ico" />
+  </ItemGroup>
+
+</Project>
