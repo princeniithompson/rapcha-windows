@@ -1,0 +1,63 @@
+name: Build and release Rapcha.exe
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Unit tests
+        run: dotnet test tests/Rapcha.Tests -c Release --nologo
+
+      - name: Build Rapcha.exe
+        run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
+
+      - name: Smoke test (starts and stays running)
+        shell: pwsh
+        run: |
+          $exe = "src/Rapcha/bin/Release/Rapcha.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 10
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.HasExited) { throw "Rapcha.exe exited early with code $($p.ExitCode)" }
+          "Working set: {0:N1} MB" -f ($p.WorkingSet64 / 1MB)
+          Stop-Process -Id $p.Id -Force
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exe = "src/Rapcha/bin/Release/Rapcha.exe"
+          $tag = "v${{ github.run_number }}"
+          $size = (Get-Item $exe).Length
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $notes = "Rapcha for Windows, build ${{ github.run_number }} ($env:GITHUB_SHA).`n`nDownload **Rapcha.exe** and open it. If Windows says 'Windows protected your PC', click More info and then Run anyway.`n`nSize: $size bytes`nSHA-256: $sha"
+          gh release create $tag $exe --title "Rapcha for Windows $tag" --notes "$notes" --latest --target $env:GITHUB_SHA
+          "## Rapcha.exe released as $tag" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| | |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Size | $size bytes ({0:N0} KB) |" -f ($size / 1KB) >> $env:GITHUB_STEP_SUMMARY
+          "| SHA-256 | ``$sha`` |" >> $env:GITHUB_STEP_SUMMARY
+          "| Download | https://github.com/${{ github.repository }}/releases/latest/download/Rapcha.exe |" >> $env:GITHUB_STEP_SUMMARY
