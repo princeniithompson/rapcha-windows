@@ -191,6 +191,14 @@ namespace Rapcha.Win
         }
 
         public const int WM_MOUSEMOVE = 0x0200;
+        public const int WM_APP = 0x8000;
+        public const int INPUT_MOUSE = 0;
+        public const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004,
+                          MOUSEEVENTF_VIRTUALDESK = 0x4000, MOUSEEVENTF_ABSOLUTE = 0x8000;
+        [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+        [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        public const int WM_COMMAND = 0x0111;
+        public const int EM_GETSEL = 0x00B0, EM_SETSEL = 0x00B1;
         public const int WM_QUIT = 0x0012;
         public const int WM_NCHITTEST = 0x0084;
         public const int HTCLIENT = 1;

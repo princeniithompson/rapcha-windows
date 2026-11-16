@@ -21,6 +21,15 @@ namespace Rapcha.Win
                 catch (Exception e) { AppStorage.Log("Selftest piper: " + e); Environment.ExitCode = 1; }
                 return;
             }
+            if (args.Length >= 2 && args[0] == "--selftest-click")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new RapchaApp(selfTestClick: args[1]));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-speak")
             {
                 // Runs beside any other copy (no single-instance hand-off, no shortcuts).
