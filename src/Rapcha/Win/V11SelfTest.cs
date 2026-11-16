@@ -379,13 +379,13 @@ namespace Rapcha.Win
             // Conflict logic (warn, don't block).
             var warnCopy = ShortcutRules.Warning(Shortcut.TryParse("Ctrl+C", out var c1) ? c1 : null);
             var warnAltTab = ShortcutRules.Warning(Shortcut.TryParse("Alt+Tab", out var c2) ? c2 : null);
-            var warnSpace = ShortcutRules.Warning(Shortcut.TryParse("Space", out var c3) ? c3 : null);
+            var spaceRefused = ShortcutRules.FromKeys(new[] { 0x20 }, out var warnSpace);   // Space alone: refused with a message
             var warnWin = ShortcutRules.Warning(Shortcut.TryParse("Win+V", out var c4) ? c4 : null);
             var warnOk = ShortcutRules.Warning(Shortcut.TryParse("Ctrl+Alt+V", out var c5) ? c5 : null);
             var warnChord = ShortcutRules.Warning(Shortcut.TryParse("Space+V", out var c6) ? c6 : null);
             var clashSet = ShortcutSet.Defaults();
             var clash = clashSet.Clash(ShortcutAction.HoldToTalk, clashSet.Tap);
-            bool conflicts = warnCopy != null && warnAltTab != null && warnSpace != null && warnWin != null && warnOk == null && warnChord == null && clash == ShortcutAction.TapToTalk;
+            bool conflicts = warnCopy != null && warnAltTab != null && spaceRefused == null && warnSpace != null && warnWin != null && warnOk == null && warnChord == null && clash == ShortcutAction.TapToTalk;
 
             var events = new List<string>();
             using (var m = new ShortcutManager(makeCurrent: false))

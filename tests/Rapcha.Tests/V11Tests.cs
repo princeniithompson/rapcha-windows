@@ -138,8 +138,6 @@ namespace Rapcha.Tests
         [InlineData("Ctrl+Alt+Delete", true)]
         [InlineData("Ctrl+Shift+Esc", true)]
         [InlineData("Shift+A", true)]
-        [InlineData("Space", true)]
-        [InlineData("F9", true)]
         [InlineData("Ctrl+Alt+V", false)]
         [InlineData("Ctrl+Alt+R", false)]
         [InlineData("Space+V", false)]
@@ -148,6 +146,14 @@ namespace Rapcha.Tests
         {
             Assert.True(Shortcut.TryParse(text, out var s));
             Assert.Equal(warn, ShortcutRules.Warning(s) != null);
+        }
+
+        [Fact]
+        public void SpaceAloneIsRefused()
+        {
+            Assert.False(Shortcut.TryParse("Space", out _));
+            Assert.Null(ShortcutRules.FromKeys(new[] { 0x20 }, out var err)); Assert.NotNull(err);
+            Assert.NotNull(ShortcutRules.Warning(new Shortcut { Key = 0x20 }));
         }
     }
 
