@@ -127,7 +127,7 @@ namespace Rapcha.Win
         /// </summary>
         public static Task<Result> FastAsync(FrameSource src, int dpi)
         {
-            double scale = dpi >= 120 ? 1.0 : 1.5;
+            const double scale = 1.0;   // as fast as possible; enlarged copies follow in the background
             return Task.Run(() =>
             {
                 var r = new Result { Scale = scale };
@@ -153,22 +153,104 @@ namespace Rapcha.Win
         /// per-selection passes did: dark themes (norm), words dropped on long mixed lines (slices), small and
         /// coloured text (enlarged colour and norm slices) and faint grey text (thresholded).
         /// </summary>
-        public static List<(string name, Func<OcrPass> run)> IndexJobs(FrameSource src, int dpi, Action between = null)
+        public static List<(string name, Func<OcrPass> run)> IndexJobs(FrameSource src, int dpi, Action between = null, Func<System.Threading.CancellationToken> token = null)
         {
             double s1 = dpi >= 120 ? 1.0 : 1.5, s2 = dpi >= 120 ? 1.5 : 2.0;
             var full = new Rectangle(0, 0, src.W, src.H);
             int tile = TileWidth(dpi);
+            int band = (int)Math.Round(300 * Math.Max(96, dpi) / 96.0);    // short bands: each engine call is brief
             string X(double v) => v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "x";
-            var jobs = new List<(string, Func<OcrPass>)>
-            {
-                ("full-norm", () => RunPass(src, full, s1, Variant.Norm, false, "full-norm", 1)),
-                ("full-norm-tiles", () => TiledPass(src, full, s1, Variant.Norm, false, "full-norm-tiles", 2, tile, between)),
-                ("full-colour-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Colour, false, "full-colour-tiles-" + X(s2), 3, tile, between)),
-                ("full-norm-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Norm, false, "full-norm-tiles-" + X(s2), 3, tile, between)),
-                ("full-bin-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Bin, false, "full-bin-tiles-" + X(s2), 2, tile, between)),
-            };
-            if (EnglishExtra()) jobs.Add(("full-norm-en", () => RunPass(src, full, s1, Variant.Norm, true, "full-norm-en", 1)));
+            OcrPass Grid(double sc, Variant v, bool en, string name, int prio, int tw) => GridPass(src, full, sc, v, en, name, prio, tw, band, between, token);
+            var jobs = new List<(string, Func<OcrPass>)>();
+            if (s1 > 1.01) jobs.Add(("full-colour-" + X(s1), () => Grid(s1, Variant.Colour, false, "full-colour-" + X(s1), 1, src.W)));
+            jobs.Add(("full-norm", () => Grid(s1, Variant.Norm, false, "full-norm", 1, src.W)));
+            jobs.Add(("full-norm-tiles", () => Grid(s1, Variant.Norm, false, "full-norm-tiles", 2, tile)));
+            jobs.Add(("full-colour-tiles-" + X(s2), () => Grid(s2, Variant.Colour, false, "full-colour-tiles-" + X(s2), 3, tile)));
+            jobs.Add(("full-norm-tiles-" + X(s2), () => Grid(s2, Variant.Norm, false, "full-norm-tiles-" + X(s2), 3, tile)));
+            jobs.Add(("full-bin-tiles-" + X(s2), () => Grid(s2, Variant.Bin, false, "full-bin-tiles-" + X(s2), 2, tile)));
+            if (EnglishExtra()) jobs.Add(("full-norm-en", () => Grid(s1, Variant.Norm, true, "full-norm-en", 1, src.W)));
             return jobs;
+        }
+
+        /// <summary>
+        /// The background index's unit of work: the area cut into tiles tileW wide (40% overlap) and bandH tall
+        /// (overlap 90 px at 100%, more than any line is tall), one short engine call each. Words touching an
+        /// inner cut edge are left to the neighbouring tile, so each word is whole in exactly one tile. Before each
+        /// tile, <paramref name="between"/> may hold the work back (a selection is being read); a tile whose engine
+        /// call was cancelled for that reason is simply done again.
+        /// </summary>
+        public static OcrPass GridPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority,
+                                       int tileW, int bandH, Action between, Func<System.Threading.CancellationToken> token)
+        {
+            var t0 = DateTime.UtcNow;
+            var pass = new OcrPass { Name = name, Priority = priority, Area = new Box(rect.X, rect.Y, rect.Width, rect.Height) };
+            tileW = Math.Max(64, Math.Min(tileW, rect.Width));
+            bandH = Math.Max(64, Math.Min(bandH, rect.Height));
+            int ox = tileW >= rect.Width ? 0 : (int)(tileW * 0.4), oy = bandH >= rect.Height ? 0 : Math.Min(bandH / 2, 90);
+            int stepX = Math.Max(1, tileW - ox), stepY = Math.Max(1, bandH - oy);
+            for (int y = rect.Y; ; y += stepY)
+            {
+                int h = Math.Min(bandH, rect.Bottom - y);
+                for (int x = rect.X; ; x += stepX)
+                {
+                    int w = Math.Min(tileW, rect.Right - x);
+                    var sub = new Rectangle(x, y, w, h);
+                    OcrPass p = null;
+                    for (int attempt = 0; attempt < 20; attempt++)
+                    {
+                        between?.Invoke();
+                        try { p = RunPass(src, sub, scale, v, english, name, priority, token?.Invoke() ?? System.Threading.CancellationToken.None); break; }
+                        catch (OperationCanceledException) { p = null; }   // a selection started: wait, then redo this tile
+                    }
+                    if (p != null)
+                    {
+                        double cutL = x > rect.X ? x + 2 : double.MinValue, cutR = x + w < rect.Right ? x + w - 2 : double.MaxValue;
+                        double cutT = y > rect.Y ? y + 2 : double.MinValue, cutB = y + h < rect.Bottom ? y + h - 2 : double.MaxValue;
+                        foreach (var line in p.Lines)
+                        {
+                            var keep = line.Where(word => word.Box.X > cutL && word.Box.Right < cutR && word.Box.Y > cutT && word.Box.Bottom < cutB).ToList();
+                            if (keep.Count > 0) pass.Lines.Add(keep);
+                        }
+                    }
+                    if (x + w >= rect.Right) break;
+                }
+                if (y + h >= rect.Bottom) break;
+            }
+            pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            return pass;
+        }
+
+        private static int _warm;
+
+        /// <summary>
+        /// Loads the OCR engine once at app start (a tiny recognition on a background, low-priority thread), so the
+        /// first overlay's first look doesn't pay for starting the engine.
+        /// </summary>
+        public static void WarmUp()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _warm, 1) == 1) return;
+            var t = new System.Threading.Thread(() =>
+            {
+                var t0 = DateTime.UtcNow;
+                try
+                {
+                    using (var b = new Bitmap(320, 64, PixelFormat.Format32bppArgb))
+                    {
+                        using (var g = Graphics.FromImage(b))
+                        using (var f = new Font("Segoe UI", 20f, FontStyle.Regular, GraphicsUnit.Pixel))
+                        {
+                            g.Clear(Color.White);
+                            g.DrawString("Rapcha warm up 123", f, Brushes.Black, 8, 16);
+                        }
+                        var src = FrameSource.From(b);
+                        var p = RunPass(src, new Rectangle(0, 0, src.W, src.H), 1.0, Variant.Colour, false, "warm", 0);
+                        EnglishExtra();
+                        AppStorage.Log("OCR warmed up in " + (int)(DateTime.UtcNow - t0).TotalMilliseconds + " ms (words=" + (p?.WordCount ?? 0) + ")");
+                    }
+                }
+                catch (Exception e) { AppStorage.Log("OCR warm-up failed: " + e.GetType().Name); }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "Rapcha OCR warm-up" };
+            t.Start();
         }
 
         /// <summary>
@@ -331,8 +413,13 @@ namespace Rapcha.Win
 
         /// <summary>Crops, enlarges and prepares one copy, runs OCR (tiled if needed); words in screen pixels.</summary>
         public static OcrPass RunPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority)
+            => RunPass(src, rect, scale, v, english, name, priority, System.Threading.CancellationToken.None);
+
+        /// <summary>As above; a cancelled token aborts the engine call (OperationCanceledException is thrown).</summary>
+        public static OcrPass RunPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority, System.Threading.CancellationToken ct)
         {
             var t0 = DateTime.UtcNow;
+            ct.ThrowIfCancellationRequested();
             try
             {
                 var engine = CreateEngine(english);
@@ -358,7 +445,8 @@ namespace Rapcha.Win
                         var tile = (tx == 0 && ty == 0 && tw == sw && th == sh) ? img : Crop(img, sw, new Rectangle(tx, ty, tw, th));
                         using (var bmp = SoftwareBitmap.CreateCopyFromBuffer(tile.AsBuffer(), BitmapPixelFormat.Bgra8, tw, th, BitmapAlphaMode.Premultiplied))
                         {
-                            var ocr = engine.RecognizeAsync(bmp).AsTask().GetAwaiter().GetResult();
+                            ct.ThrowIfCancellationRequested();
+                            var ocr = engine.RecognizeAsync(bmp).AsTask(ct).GetAwaiter().GetResult();
                             foreach (var line in ocr.Lines)
                             {
                                 var words = new List<OcrWord>();
@@ -377,6 +465,7 @@ namespace Rapcha.Win
                 pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
                 return pass;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception e)
             {
                 AppStorage.Log("OCR pass " + name + " failed: " + e.GetType().Name);

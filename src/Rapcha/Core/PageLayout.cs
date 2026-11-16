@@ -224,51 +224,66 @@ namespace Rapcha.Core
 
         // ---------------- Blocks ----------------
 
+        /// <summary>
+        /// Paragraphs inside a region, column-aware: a line joins the block whose last line sits right above it
+        /// (vertical gap at most <see cref="BlockGap"/> line heights, or up to 1.4x the block's own line spacing),
+        /// with a similar text height (<see cref="HeightRatio"/>), overlapping it sideways and lined up on the left
+        /// edge or the centre (<see cref="AlignSlop"/> line heights, so a wrapped list item's indent stays in).
+        /// Lines side by side are never one block (they are separate columns or cards), even where the XY-cut could
+        /// not separate the columns (a window overlapping another, a line bridging the gutter).
+        /// Blocks are read top to bottom, then left to right.
+        /// </summary>
         private static List<TextBlock> GroupBlocks(List<TextLine> region)
         {
-            // Rows: lines that share most of their height, left to right.
-            var rows = new List<List<TextLine>>();
-            foreach (var l in region.OrderBy(l => l.Box.Y))
-            {
-                var row = rows.Count > 0 ? rows[rows.Count - 1] : null;
-                if (row != null)
-                {
-                    var rb = row.Aggregate(new Box(), (s, x) => s.Union(x.Box));
-                    double overlap = Math.Min(rb.Bottom, l.Box.Bottom) - Math.Max(rb.Y, l.Box.Y);
-                    if (overlap >= 0.5 * Math.Min(rb.H, l.Box.H)) { row.Add(l); continue; }
-                }
-                rows.Add(new List<TextLine> { l });
-            }
-            foreach (var r in rows) r.Sort((x, y) => x.Box.X.CompareTo(y.Box.X));
-
             var blocks = new List<TextBlock>();
-            TextBlock cur = null;
-            double lastGap = -1, lastH = 0;
-            Box lastRow = new Box();
-            foreach (var r in rows)
+            var last = new List<TextLine>();
+            var spacing = new List<double>();
+            foreach (var l in region.OrderBy(x => x.Box.Y).ThenBy(x => x.Box.X))
             {
-                var rb = r.Aggregate(new Box(), (s, x) => s.Union(x.Box));
-                bool join = false;
-                if (cur != null)
+                int best = -1;
+                double bestGap = double.MaxValue;
+                for (int i = 0; i < blocks.Count; i++)
                 {
-                    double hPrev = lastH;
-                    double hNow = Median(r.Select(x => x.Box.H));
-                    double h = Math.Min(hPrev, hNow);
-                    double gap = rb.Y - lastRow.Bottom;
+                    var b = blocks[i];
+                    var prev = last[i];
+                    double hPrev = prev.Box.H, hNow = l.Box.H;
+                    double h = Math.Max(1, Math.Min(hPrev, hNow));
+                    double gap = l.Box.Y - prev.Box.Bottom;
+                    if (gap < -0.5 * h) continue;                                   // side by side: not one under the other
                     bool similar = Math.Max(hPrev, hNow) <= HeightRatio * Math.Min(hPrev, hNow);
-                    bool aligned = Math.Abs(rb.X - cur.Box.X) <= AlignSlop * h || Math.Abs(rb.CenterX - cur.Box.CenterX) <= AlignSlop * h;
-                    double allowed = Math.Max(BlockGap * h, lastGap >= 0 ? lastGap * 1.4 : 0);
+                    bool overlapX = Math.Min(l.Box.Right, b.Box.Right) - Math.Max(l.Box.X, b.Box.X) > 0;
+                    bool aligned = overlapX && (Math.Abs(l.Box.X - b.Box.X) <= AlignSlop * h || Math.Abs(l.Box.CenterX - b.Box.CenterX) <= AlignSlop * h);
+                    double allowed = Math.Max(BlockGap * h, spacing[i] >= 0 ? spacing[i] * 1.4 : 0);
                     allowed = Math.Min(allowed, 1.5 * h);
-                    join = gap <= allowed && similar && aligned;
-                    if (join) lastGap = Math.Max(0, gap);
+                    if (gap <= allowed && similar && aligned && gap < bestGap) { best = i; bestGap = gap; }
                 }
-                if (!join) { cur = new TextBlock(); blocks.Add(cur); lastGap = -1; }
-                cur.Lines.AddRange(r);
-                cur.Box = cur.Box.Union(rb);
-                lastRow = rb;
-                lastH = Median(r.Select(x => x.Box.H));
+                if (best >= 0 && Between(region, last[best], l)) best = -1;            // another line sits in between
+                if (best < 0)
+                {
+                    var nb = new TextBlock();
+                    nb.Lines.Add(l); nb.Box = l.Box;
+                    blocks.Add(nb); last.Add(l); spacing.Add(-1);
+                    continue;
+                }
+                blocks[best].Lines.Add(l);
+                blocks[best].Box = blocks[best].Box.Union(l.Box);
+                last[best] = l;
+                spacing[best] = Math.Max(0, bestGap);
             }
-            return blocks;
+            return blocks.OrderBy(b => b.Box.Y).ThenBy(b => b.Box.X).ToList();
+        }
+
+        /// <summary>Is there a line vertically between a and b that overlaps both sideways?</summary>
+        private static bool Between(List<TextLine> region, TextLine a, TextLine b)
+        {
+            foreach (var l in region)
+            {
+                if (l == a || l == b) continue;
+                if (l.Box.CenterY <= a.Box.Bottom || l.Box.CenterY >= b.Box.Y) continue;
+                if (Math.Min(l.Box.Right, b.Box.Right) - Math.Max(l.Box.X, b.Box.X) > 0 &&
+                    Math.Min(l.Box.Right, a.Box.Right) - Math.Max(l.Box.X, a.Box.X) > 0) return true;
+            }
+            return false;
         }
 
         // ---------------- Selection ----------------

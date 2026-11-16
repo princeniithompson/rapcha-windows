@@ -197,7 +197,7 @@ namespace Rapcha.Win
         {
             if (_indexThread != null || _ocr == null) return;
             var have = new HashSet<string>(_ocr.Passes.Select(p => p.Name));
-            var jobs = OcrService.IndexJobs(Source, _dpi, YieldToReading).Where(j => !have.Contains(j.name)).ToList();
+            var jobs = OcrService.IndexJobs(Source, _dpi, YieldToReading, () => _hotCts.Token).Where(j => !have.Contains(j.name)).ToList();
             _indexJobs = jobs.Count;
             if (jobs.Count == 0) { IndexReady = true; IndexMs = (int)(DateTime.UtcNow - _openedAt).TotalMilliseconds; return; }
             var basePasses = _ocr.Passes.ToList();
@@ -209,10 +209,10 @@ namespace Rapcha.Win
                 var all = new List<OcrPass>(basePasses);
                 foreach (var job in jobs)
                 {
-                    YieldToReading();
-                    if (_closing) return;
+                    if (!SafeYield()) return;
                     OcrPass p = null;
                     try { p = job.run(); }
+                    catch (System.Threading.ThreadInterruptedException) { return; }
                     catch (Exception e) { AppStorage.Log("Overlay index: pass failed " + e.GetType().Name); }
                     if (_closing) return;
                     OcrService.Result r = null;
@@ -221,7 +221,7 @@ namespace Rapcha.Win
                         all.Add(p);
                         r = new OcrService.Result { Language = lang, Scale = scale, Ms = firstMs };
                         r.Passes.AddRange(all);
-                        YieldToReading();
+                        if (!SafeYield()) return;
                         var t0 = DateTime.UtcNow;
                         OcrService.Rebuild(r);   // merge + lines + blocks, off the UI thread
                         p.MergeMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
@@ -233,13 +233,40 @@ namespace Rapcha.Win
             _indexThread.Start();
         }
 
-        /// <summary>Background passes wait while a selection is being read (so the voice starts without competition).</summary>
+        /// <summary>
+        /// Called by the background index before every tile: it waits while a selection is starting (so the voice
+        /// starts without competing for the CPU), and while speech plays it leaves the CPU idle most of the time
+        /// (a short tile, then a pause twice as long), so the audio never stutters on a slow laptop.
+        /// </summary>
         private void YieldToReading()
         {
-            while (!_closing && Now() < System.Threading.Interlocked.Read(ref _hotUntil)) System.Threading.Thread.Sleep(40);
+            while (!_closing && Now() < System.Threading.Interlocked.Read(ref _hotUntil)) System.Threading.Thread.Sleep(30);
+            if (_closing) throw new System.Threading.ThreadInterruptedException();   // the overlay closed: stop the index
+            if (!_closing && _speaking)
+            {
+                long spent = Now() - System.Threading.Interlocked.Read(ref _lastYield);
+                System.Threading.Thread.Sleep((int)Math.Max(60, Math.Min(400, 2 * spent)));
+            }
+            System.Threading.Interlocked.Exchange(ref _lastYield, Now());
         }
 
-        private void MarkHot(int ms) => System.Threading.Interlocked.Exchange(ref _hotUntil, Now() + ms);
+        private bool SafeYield()
+        {
+            try { YieldToReading(); return !_closing; }
+            catch (System.Threading.ThreadInterruptedException) { return false; }
+        }
+
+        private volatile bool _speaking;
+        private long _lastYield;
+        private System.Threading.CancellationTokenSource _hotCts = new System.Threading.CancellationTokenSource();
+
+        /// <summary>A selection is starting: hold the background index back, and abort the engine call in flight.</summary>
+        private void MarkHot(int ms)
+        {
+            System.Threading.Interlocked.Exchange(ref _hotUntil, Now() + ms);
+            var old = System.Threading.Interlocked.Exchange(ref _hotCts, new System.Threading.CancellationTokenSource());
+            try { old.Cancel(); } catch { }
+        }
 
         private void IndexStep(OcrService.Result r, string name, OcrPass p)
         {
@@ -498,11 +525,12 @@ namespace Rapcha.Win
         private void OnReaderChanged()
         {
             if (_reader == null) return;
+            _speaking = _reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing;
             if (_waitFirstWord && _reader.Status == ReadState.Playing && _reader.AudioStartedAt != DateTime.MinValue && _reader.AudioStartedAt >= _releaseAt)
             {
                 _waitFirstWord = false;
                 FirstWordMs = (int)(_reader.AudioStartedAt - _releaseAt).TotalMilliseconds;
-                MarkHot(800);   // the background index waits a little longer so the start stays smooth
+                System.Threading.Interlocked.Exchange(ref _hotUntil, Now() + 1200);   // the index waits a little longer so the start stays smooth
                 AppStorage.Log("Overlay latency: mode=" + LastMode + " release_to_words_ms=" + WordsReadyMs + " release_to_audio_ms=" + FirstWordMs +
                                " index=" + LastIndexState + " passes=" + (_ocr?.Passes.Count ?? 0) + " voice=" + (_reader is OneCoreReader ? "onecore" : "sapi") +
                                " open_age_ms=" + (int)(_releaseAt - _openedAt).TotalMilliseconds);
@@ -941,6 +969,7 @@ namespace Rapcha.Win
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             _closing = true;
+            try { _hotCts.Cancel(); } catch { }
             _anim.Stop();
             _previewTimer.Stop();
             _tapTimer.Stop();

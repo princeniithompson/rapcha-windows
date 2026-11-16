@@ -270,6 +270,23 @@ namespace Rapcha.Tests
         }
 
         [Fact]
+        public void TapParagraphStaysInItsColumnWhenColumnsCannotBeCut()
+        {
+            // The CI screen: Notepad over a console. Console fragments run down the left edge and the right side,
+            // level with Notepad's lines, and one stray line bridges the gutter, so the XY-cut can't split columns.
+            var l = new OcrLayout();
+            for (int i = 0; i < 12; i++) l.AddLine(Words("frag" + i, 34, 80 + i * 19, 13));
+            for (int i = 0; i < 12; i++) l.AddLine(Words("console output line " + i, 844, 80 + i * 19, 13));
+            l.AddLine(Words("File Edit Format View Help", 93, 113, 12));
+            l.AddLine(Words("The quick brown fox jumps over the lazy dog.", 120, 140, 16));
+            l.AddLine(Words("This second line must not be read.", 120, 160, 16));
+            l.AddLine(Words(", , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , , ,", 243, 400, 6, 3, 10));
+            var page = PageLayout.Analyze(l);
+            var part = page.ParagraphAt(200, 148, 24);
+            Assert.Equal("The quick brown fox jumps over the lazy dog. This second line must not be read.", string.Join(" ", part.Words.Select(w => w.Text)));
+        }
+
+        [Fact]
         public void OverlappingDuplicatesFromPassesAndSlicesAreReadOnce()
         {
             // The same line seen twice (two passes / overlapping slices), one copy shifted 2 px and one word misread.

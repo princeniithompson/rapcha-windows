@@ -123,6 +123,7 @@ namespace Rapcha.Win
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
             Uia.WarmUp();
+            OcrService.WarmUp();                  // the first overlay's first look doesn't pay for starting the OCR engine
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
             // Select to speak keeps one primed voice for the app's lifetime, so no selection waits for an engine to start.
             var prime = new Timer { Interval = 2500 };
@@ -593,6 +594,7 @@ namespace Rapcha.Win
             AppStorage.Log("Selftest ocr: sapi_voices=" + voices);
             if (voices == 0) { SelfTestExit(2); return; }
             int stage = 0, closeWait = 0, startsBefore = 0;
+            bool tapFromStart = false;
             Rectangle area0 = Rectangle.Empty;
             Box columnsBox = new Box();
             DateTime stageAt = DateTime.UtcNow;
@@ -611,7 +613,7 @@ namespace Rapcha.Win
                 // a box reads only the lines it touches, so the second line must not be read then.
                 bool tap = how == "tap";
                 bool second = !tap && text.IndexOf("second", StringComparison.OrdinalIgnoreCase) >= 0;
-                if (tap && !text.TrimStart().StartsWith("The quick", StringComparison.OrdinalIgnoreCase)) second = true;
+                if (tap && !tapFromStart) second = true;   // a tap reads its paragraph from the paragraph's first word
                 var r = _overlay.Reader;
                 AppStorage.Log("Selftest ocr: " + how + " expected_found=" + all + " second_line_read=" + second + " words=" + r.Plan.Words.Count +
                                " progress_events=" + r.ProgressEvents + " last_word=" + r.CurrentWord + " highlight_moves=" + _overlay.HighlightMoves + " voice=\"" + r.VoiceName + "\"");
@@ -655,7 +657,12 @@ namespace Rapcha.Win
                         if (!Check("two_clicks")) { Fail(4, "two clicks"); return; }
                     {
                         var w = line.Words[Math.Min(1, line.Words.Count - 1)].Box;
+                        var para = _overlay.Ocr.Page.ParagraphAt(w.CenterX, w.CenterY, 24);
                         _overlay.SimulateTap(w.CenterX, w.CenterY);
+                        var first = _overlay.LastReadWords.FirstOrDefault();
+                        tapFromStart = para != null && first != null && para.Words.Count > 0 &&
+                                       Math.Abs(first.Box.X - para.Words[0].Box.X) < 2 && Math.Abs(first.Box.Y - para.Words[0].Box.Y) < 2;
+                        AppStorage.Log("Selftest ocr: tap paragraph lines=" + (para?.Words.Select(x => x.Line).Distinct().Count() ?? 0) + " from_start=" + tapFromStart);
                     }
                         stage = 4;
                         break;
