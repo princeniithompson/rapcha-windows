@@ -12,8 +12,20 @@ namespace Rapcha.Win
         public static Icon SmallIcon { get; private set; }
 
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
+            if (args.Length >= 2 && args[0] == "--selftest-speak")
+            {
+                // Runs beside any other copy (no single-instance hand-off, no shortcuts).
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new RapchaApp(args[1]));
+                return;
+            }
+
             // Same mutex name as v1/v2, so an old copy is always detected.
             var mutex = new Mutex(false, InstanceManager.MutexName);
             bool owned = false;

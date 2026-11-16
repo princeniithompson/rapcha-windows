@@ -35,6 +35,11 @@ namespace Rapcha.Win
         private Point _downRing;
 
         public event Action Clicked;
+        public event Action DoubleClicked;
+
+        // Single vs double click: when idle, a click waits for the system double-click time before it counts.
+        private readonly Timer _clickWait = new Timer();
+        private bool _selectMode;
         public event Action<Point> RightClicked;
         public event Action Moved;
 
@@ -42,6 +47,7 @@ namespace Rapcha.Win
         {
             _anim.Tick += (s, e) => Render();
             _topmost.Tick += (s, e) => KeepOnTop();
+            _clickWait.Tick += (s, e) => { _clickWait.Stop(); Clicked?.Invoke(); };
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         }
 
@@ -58,10 +64,17 @@ namespace Rapcha.Win
             set
             {
                 _state = value;
-                _anim.Enabled = value != RingState.Idle;
+                _anim.Enabled = value != RingState.Idle || _selectMode;
                 if (value == RingState.Idle) _level = 0;
                 Render();
             }
+        }
+
+        /// <summary>Select-to-speak is on: the idle ring shows a slow cream halo.</summary>
+        public bool SelectMode
+        {
+            get => _selectMode;
+            set { _selectMode = value; _anim.Enabled = _state != RingState.Idle || value; Render(); }
         }
 
         public float Level { set { _level = Math.Max(0f, Math.Min(1f, value)); } }
@@ -149,6 +162,18 @@ namespace Rapcha.Win
                     }
                 }
 
+                if (_selectMode && _state == RingState.Idle)
+                {
+                    double t = (DateTime.UtcNow - _born).TotalSeconds;
+                    double breath = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 2.4);
+                    float w = Math.Max(2f, glow * 0.45f);
+                    float inset = glow * 0.35f;
+                    using (var halo = new Pen(Color.FromArgb((int)(90 + 80 * breath), 200, 225, 120), w))
+                        g.DrawEllipse(halo, inset, inset, size - inset * 2, size - inset * 2);
+                    using (var arc = new Pen(Color.FromArgb(235, 255, 244, 200), w) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                        g.DrawArc(arc, inset, inset, size - inset * 2, size - inset * 2, (float)((t * 120) % 360), 70f);
+                }
+
                 if (Lifebuoy != null) g.DrawImage(Lifebuoy, new Rectangle(glow, glow, ring, ring));
                 else
                 {
@@ -213,11 +238,25 @@ namespace Rapcha.Win
                 _dragging = false;
                 SnapToNearestEdge();
             }
+            else if (_state != RingState.Idle)
+            {
+                _clickWait.Stop();
+                Clicked?.Invoke(); // stopping a recording never waits
+            }
+            else if (_clickWait.Enabled)
+            {
+                _clickWait.Stop();
+                DoubleClicked?.Invoke();
+            }
             else
             {
-                Clicked?.Invoke();
+                _clickWait.Interval = (int)Math.Max(200, Math.Min(500, Native.GetDoubleClickTime()));
+                _clickWait.Start();
             }
         }
+
+        /// <summary>For the self-test hook: behaves like a double-click on the ring.</summary>
+        public void SimulateDoubleClick() => DoubleClicked?.Invoke();
 
         protected override void WndProc(ref Message m)
         {

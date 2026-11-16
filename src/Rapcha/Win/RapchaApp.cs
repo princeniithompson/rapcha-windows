@@ -36,8 +36,18 @@ namespace Rapcha.Win
         private bool _micHintShown;
         private SettingsForm _settings;
 
-        public RapchaApp()
+        // Select to speak
+        private readonly EdgeGlow _glow = new EdgeGlow();
+        private readonly SelectionWatcher _watcher = new SelectionWatcher();
+        private readonly ReadingCard _card = new ReadingCard();
+        private SpeechReader _reader;
+        private bool _selectMode;
+        private int _captureGeneration;
+        private readonly string _selfTestSpeak;
+
+        public RapchaApp(string selfTestSpeak = null)
         {
+            _selfTestSpeak = selfTestSpeak;
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
@@ -49,6 +59,10 @@ namespace Rapcha.Win
 
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
+            _ring.DoubleClicked += () => SetSelectMode(!_selectMode);
+            _watcher.SelectionFinished += OnSelectionFinished;
+            _watcher.EscapePressed += () => { if (_selectMode && _phase == Phase.Idle) SetSelectMode(false); };
+            _card.ButtonClicked += OnCardButton;
             _ring.Moved += () => { if (_label.Visible) _label.HideNow(); };
             _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
             _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
@@ -63,6 +77,7 @@ namespace Rapcha.Win
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
+            if (_selfTestSpeak != null) { RunSpeakSelfTest(); return; }
             if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey()))
                 OpenSettings("Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.");
         }
@@ -94,6 +109,8 @@ namespace Rapcha.Win
                 return;
             }
 
+            StopReading(); // voice typing always wins over reading aloud
+            _watcher.Stop(); // no input hooks while dictating and pasting (they must never be starved)
             _settings?.PauseMeter();
             _target = TextDelivery.CaptureTarget();
             var vocab = AppStorage.LoadVocabulary();
@@ -122,6 +139,7 @@ namespace Rapcha.Win
                 session.Dispose();
                 ShowLabel(SettingsForm.MicHelp(problem), 8000, true);
                 _settings?.ResumeMeter();
+                ResumeSelectWatch();
                 return;
             }
 
@@ -187,12 +205,13 @@ namespace Rapcha.Win
             text = (text ?? "").Trim();
             LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
-            ResetToIdle();
+            ResetToIdle(resumeWatch: false);
 
             if (text.Length == 0)
             {
                 var reason = EmptyReason(recorder, session);
                 AppStorage.Log("[s" + number + "] empty result shown as: " + reason);
+                ResumeSelectWatch();
                 _bubble.Set(WordsBubble.Mode.Warning, reason);
                 await Task.Delay(reason == Messages.NothingHeard ? 2000 : 5000);
                 if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
@@ -202,6 +221,7 @@ namespace Rapcha.Win
             _bubble.Set(WordsBubble.Mode.Final, text);
             var result = TextDelivery.Deliver(text, _target);
             AppStorage.Log("[s" + number + "] delivered: " + result);
+            ResumeSelectWatch();
             await Task.Delay(900);
             if (gen != _generation) return;
             switch (result)
@@ -273,7 +293,12 @@ namespace Rapcha.Win
             if (err.Kind == LiveErrorKind.BadKey || err.Kind == LiveErrorKind.MissingKey) OpenSettings(msg);
         }
 
-        private void ResetToIdle()
+        private void ResumeSelectWatch()
+        {
+            if (_selectMode && _phase == Phase.Idle) _watcher.Start();
+        }
+
+        private void ResetToIdle(bool resumeWatch = true)
         {
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
@@ -282,6 +307,7 @@ namespace Rapcha.Win
             _recorder = null;
             _ring.State = RingState.Idle;
             _settings?.ResumeMeter();
+            if (resumeWatch) ResumeSelectWatch();
         }
 
         private void ShowLabel(string text, int hideAfterMs, bool warning = false)
@@ -306,8 +332,144 @@ namespace Rapcha.Win
             _settings.Activate();
         }
 
+        // ---------------- Select to speak ----------------
+
+        private void SetSelectMode(bool on)
+        {
+            if (on == _selectMode) return;
+            _selectMode = on;
+            _ring.SelectMode = on;
+            if (on)
+            {
+                _glow.Show();
+                _watcher.Start();
+                _ring.KeepOnTop();
+                AppStorage.Log("Select to speak on: screens=" + Screen.AllScreens.Length + " glow_windows=" + _glow.WindowCount);
+                ShowLabel("Select to speak is on. Select text in any app to hear it. Double-click the ring or press Esc to stop.", 4500);
+            }
+            else
+            {
+                _captureGeneration++;
+                _watcher.Stop();
+                _glow.Hide();
+                StopReading();
+                _reader?.Dispose();
+                _reader = null; // frees the voice engine while the mode is off
+                AppStorage.Log("Select to speak off");
+                ShowLabel("Select to speak is off", 1500);
+            }
+        }
+
+        private SpeechReader Reader(bool silent = false)
+        {
+            if (_reader == null)
+            {
+                _reader = new SpeechReader(silent);
+                _card.Attach(_reader);
+            }
+            return _reader;
+        }
+
+        private async void OnSelectionFinished()
+        {
+            if (!_selectMode || _phase != Phase.Idle) return;
+            var fg = Native.GetForegroundWindow();
+            if (!TextDelivery.IsUsableTarget(fg)) return; // our own windows, the desktop, the taskbar
+            int gen = ++_captureGeneration;
+            string text;
+            try { text = await SelectionReader.GetAsync(fg); }
+            catch (Exception e) { AppStorage.Log("Selection failed: " + e.GetType().Name); return; }
+            if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle) return;
+            if (string.IsNullOrWhiteSpace(text)) return; // a plain click or nothing selected: stay quiet
+            StartReading(text);
+        }
+
+        private void StartReading(string text)
+        {
+            _label.HideNow();
+            _card.Open(_ring.RingBounds, _ring.Edge, Dpi);
+            try
+            {
+                Reader().Read(text);
+                AppStorage.Log("Reading: words=" + _reader.Plan.Words.Count + " phrases=" + _reader.Plan.Phrases.Count + " voice=\"" + _reader.VoiceName + "\"");
+            }
+            catch (Exception e)
+            {
+                AppStorage.Log("Speech start failed: " + e.GetType().Name + " " + e.Message);
+                _reader?.Dispose(); _reader = null;
+                _card.ShowStatus(SpeechReader.CountVoices() == 0 ? "No Windows voice is installed." : "No speaker found. Check your sound output.");
+            }
+        }
+
+        private void StopReading()
+        {
+            _reader?.Stop();
+            _card.Close2();
+        }
+
+        private void OnCardButton(ReadingCard.Button b)
+        {
+            if (_reader == null) { if (b == ReadingCard.Button.Stop) _card.Close2(); return; }
+            switch (b)
+            {
+                case ReadingCard.Button.PlayPause: _reader.TogglePause(); break;
+                case ReadingCard.Button.Back: _reader.Skip(-ReadingPlan.SkipWords); break;
+                case ReadingCard.Button.Forward: _reader.Skip(ReadingPlan.SkipWords); break;
+                case ReadingCard.Button.Stop: StopReading(); break;
+            }
+        }
+
+        /// <summary>
+        /// CI hook (--selftest-speak "text"): toggles the mode on like a double-click, reads the text with the
+        /// offline voice into memory (runners may have no sound card), checks word progress, toggles off, exits.
+        /// Exit codes: 0 ok, 2 no voice installed, 1 failure.
+        /// </summary>
+        private void RunSpeakSelfTest()
+        {
+            int voices = SpeechReader.CountVoices();
+            AppStorage.Log("Selftest speak: voices=" + voices);
+            if (voices == 0) { SelfTestExit(2); return; }
+            var deadline = new Timer { Interval = 30000 };
+            deadline.Tick += (s, e) => { deadline.Stop(); AppStorage.Log("Selftest speak: timed out"); SelfTestExit(1); };
+            deadline.Start();
+            var go = new Timer { Interval = 1500 };
+            go.Tick += (s, e) =>
+            {
+                go.Stop();
+                _ring.SimulateDoubleClick();
+                if (!_selectMode || !_glow.Active || !_watcher.Running) { AppStorage.Log("Selftest speak: mode did not turn on"); SelfTestExit(1); return; }
+                var r = Reader(silent: true);
+                r.Changed += () =>
+                {
+                    if (r.Status != SpeechReader.State.Finished) return;
+                    deadline.Stop();
+                    bool ok = r.ProgressEvents > 0 && r.CurrentWord == r.Plan.Words.Count - 1;
+                    AppStorage.Log("Selftest speak: finished words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count +
+                                   " progress_events=" + r.ProgressEvents + " voice=\"" + r.VoiceName + "\" ok=" + ok);
+                    _ring.SimulateDoubleClick();
+                    bool off = !_selectMode && !_glow.Active && !_watcher.Running;
+                    AppStorage.Log("Selftest speak: mode off=" + off);
+                    SelfTestExit(ok && off ? 0 : 1);
+                };
+                StartReading(_selfTestSpeak);
+            };
+            go.Start();
+        }
+
+        private void SelfTestExit(int code)
+        {
+            Environment.ExitCode = code;
+            var t = new Timer { Interval = 50 }; // never exit from inside the constructor or an event
+            t.Tick += (s, e) => { t.Stop(); ExitApp(); };
+            t.Start();
+        }
+
         private void ExitApp()
         {
+            _watcher.Dispose();
+            _glow.Dispose();
+            _reader?.Dispose();
+            _card.Close();
             Cancel(null);
             _tray.Visible = false;
             _tray.Dispose();
