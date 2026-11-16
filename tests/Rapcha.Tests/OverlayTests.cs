@@ -87,16 +87,15 @@ namespace Rapcha.Tests
         }
 
         [Fact]
-        public void ShortLinesHighlightTheWholeLineLongOnesTheWord()
+        public void HighlightIsTheWordWithItsLinesHeight()
         {
             var layout = new OcrLayout();
-            layout.AddLine(new[] { new OcrWord("Wi-Fi", new Box(0, 0, 40, 10)), new OcrWord("settings", new Box(45, 0, 60, 10)) });
-            layout.AddLine(new[] { "One", "two", "three", "four" }.Select((t, i) => new OcrWord(t, new Box(i * 50, 30, 40, 10))));
-            var s = new SpokenText(layout.Select(new Box(0, 0, 300, 50)));
-            var first = s.HighlightFor(0);
-            Assert.Equal(0, first.X); Assert.Equal(105, first.Right);   // the whole short line
-            var third = s.HighlightFor(4);                              // "three" on the long line
-            Assert.Equal(100, third.X); Assert.Equal(40, third.W);
+            layout.AddLine(new[] { new OcrWord("Ecommerce", new Box(0, 12, 80, 14)), new OcrWord("page", new Box(90, 10, 40, 20)) });
+            var page = PageLayout.Analyze(layout);
+            var s = new SpokenText(page.Blocks[0].Words.ToList());
+            var h = s.HighlightFor(0);
+            Assert.Equal(0, h.X); Assert.Equal(80, h.W);
+            Assert.Equal(10, h.Y); Assert.Equal(20, h.H);   // line top and height, not the word's own
         }
     }
 

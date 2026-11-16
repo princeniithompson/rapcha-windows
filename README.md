@@ -33,6 +33,8 @@ Click **Cancel**, right-click the ring, or press **Esc** while it is listening t
 
 Double-click the ring. The screen freezes, dims a little and its edges glow, like Circle to Search. **Drag a box around any text** (a bright green box follows your mouse or touchpad), or **click one corner and then the other**, or **tap a word** to hear its whole line. Rapcha reads exactly the text inside the box and a green box moves along word by word. Use **Back 10**, **Pause/Play**, **Forward 10** and **Stop** at the bottom (or Space and the arrow keys). When reading ends you can draw another box. Press **Esc**, click the **X**, or double-click the ring to go back. If there is no text in the box it says "No text found there."
 
+Rapcha reads the screen like a page of a book: it finds columns, paragraphs, headings, list items and cards, and reads column by column, top to bottom. Your box snaps to what you meant: a block that is mostly inside the box (half its text, or 60% of its lines) is read whole, a block the box only grazes (under a quarter) is left out, and a box drawn tightly around a heading or a few lines reads just those. Before reading, the blocks it picked flash with soft green outlines and numbers 1, 2, 3 in reading order.
+
 Text is found with the offline text recognition built into Windows, and read with the built-in Windows voice. Nothing is downloaded and nothing leaves your PC. Settings has a reading speed slider. (Older versions downloaded a Piper voice to `%AppData%\Rapcha\piper`; Rapcha now deletes it to free the space.)
 
 ## For developers

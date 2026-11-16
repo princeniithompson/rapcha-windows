@@ -424,7 +424,7 @@ namespace Rapcha.Win
         /// words were found, then selects the first line with a drag, with two corner clicks, and with a tap on a
         /// word, each read with the Windows voice into a silent stream. Finally presses Esc and checks the
         /// overlay and glow are gone. Exit: 0 ok, 2 no voice, 3 OCR/words missing, 4 selection/reading wrong,
-        /// 5 close failed, 6 OCR unavailable, 1 other/timeout.
+        /// 5 close failed, 6 OCR unavailable, 7 two-column page read out of order, 1 other/timeout.
         /// </summary>
         private void RunOcrSelfTest()
         {
@@ -433,12 +433,14 @@ namespace Rapcha.Win
             AppStorage.Log("Selftest ocr: sapi_voices=" + voices);
             if (voices == 0) { SelfTestExit(2); return; }
             int stage = 0;
-            OcrLine line = null;
+            DateTime stageAt = DateTime.UtcNow;
+            TextLine line = null;
+            ColumnsTestForm columns = null;
             var poll = new Timer { Interval = 150 };
             var deadline = new Timer { Interval = 120000 };
             deadline.Tick += (s, e) => { deadline.Stop(); poll.Stop(); AppStorage.Log("Selftest ocr: timed out at stage " + stage); SelfTestExit(1); };
             void Fail(int code, string why) { poll.Stop(); deadline.Stop(); AppStorage.Log("Selftest ocr: FAIL " + why); SelfTestExit(code); }
-            bool Done() => _overlay.Reader != null && _overlay.Reader.Status == ReadState.Finished;
+            bool Done() => !_overlay.Previewing && _overlay.Reader != null && _overlay.Reader.Status == ReadState.Finished;
             bool Check(string how)
             {
                 var text = _overlay.LastReadText;
@@ -468,7 +470,7 @@ namespace Rapcha.Win
                         AppStorage.Log("Selftest ocr: ocr_ms=" + r.Ms + " lang=" + r.Language + " scale=" + r.Scale + " lines=" + r.Layout.Lines.Count + " words=" + r.Layout.WordCount +
                                        (r.Problem.Length > 0 ? " problem=yes" : ""));
                         if (r.Problem == OcrService.NoLanguage) { Fail(6, "no OCR language"); return; }
-                        line = r.Layout.Lines.FirstOrDefault(l => l.Words.Any(w => string.Equals(w.Text.Trim('.', ','), expected[0], StringComparison.OrdinalIgnoreCase)));
+                        line = r.Page.Lines.FirstOrDefault(l => l.Words.Any(w => string.Equals(w.Text.Trim('.', ','), expected[0], StringComparison.OrdinalIgnoreCase)));
                         bool found = line != null && expected.All(x => line.Words.Any(w => string.Equals(w.Text.Trim('.', ','), x, StringComparison.OrdinalIgnoreCase)));
                         AppStorage.Log("Selftest ocr: expected words on one line=" + found + (line != null ? " line_box=" + line.Box : ""));
                         if (!found) { Fail(3, "expected words not recognised"); return; }
@@ -497,7 +499,7 @@ namespace Rapcha.Win
                         // Empty space far from any text: "No text found there."
                     {
                         // Find a spot with no recognised text at all.
-                        var layout = _overlay.Ocr.Layout;
+                        var layout = _overlay.Ocr.Page;
                         Box empty = new Box();
                         for (int y = 60; y + 40 < _overlay.ClientSize.Height - 140 && empty.IsEmpty; y += 20)
                             for (int x = 40; x + 160 < _overlay.ClientSize.Width - 40 && empty.IsEmpty; x += 20)
@@ -527,11 +529,58 @@ namespace Rapcha.Win
                         if (_overlay != null) return;
                         bool closed = !_glow.Active && Application.OpenForms.OfType<ScreenOverlay>().Count() == 0;
                         bool piperGone = !System.IO.Directory.Exists(VoiceSettings.PiperFolder);
-                        AppStorage.Log("Selftest ocr: closed=" + closed + " piper_folder_gone=" + piperGone + " ok=" + (closed && piperGone));
-                        poll.Stop(); deadline.Stop();
-                        SelfTestExit(closed && piperGone ? 0 : 5);
+                        AppStorage.Log("Selftest ocr: closed=" + closed + " piper_folder_gone=" + piperGone);
+                        if (!closed || !piperGone) { Fail(5, "close/cleanup"); return; }
+                        // Part 2: a two-column page (header, paragraph, list on the left; cards level with it on the right).
+                        columns = new ColumnsTestForm();
+                        columns.Show();
+                        columns.Activate();
+                        stageAt = DateTime.UtcNow;
+                        stage = 7;
                         break;
                     }
+                    case 7:
+                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 1200) return;
+                        _ring.SimulateDoubleClick();
+                        if (_overlay == null) { Fail(1, "overlay did not open again"); return; }
+                        stage = 8;
+                        break;
+                    case 8:
+                    {
+                        var r = _overlay.Ocr;
+                        if (r == null) return;
+                        var area = columns.RectangleToScreen(columns.ClientRectangle);
+                        var origin = _overlay.Bounds.Location;
+                        AppStorage.Log("Selftest ocr: columns page lines=" + r.Page.Lines.Count + " blocks=" + r.Page.Blocks.Count);
+                        _overlay.SimulateDrag(new Box(area.X - origin.X + 4, area.Y - origin.Y + 4, area.Width - 8, area.Height - 8));
+                        stage = 9;
+                        break;
+                    }
+                    case 9:
+                    {
+                        if (!Done()) return;
+                        var text = _overlay.LastReadText;
+                        var order = ColumnsTestForm.OrderTokens.Select(t => text.IndexOf(t, StringComparison.OrdinalIgnoreCase)).ToArray();
+                        bool all = order.All(i => i >= 0);
+                        bool inOrder = all && order.Zip(order.Skip(1), (a, b) => a < b).All(x => x);
+                        AppStorage.Log("Selftest ocr: columns tokens_found=" + order.Count(i => i >= 0) + "/" + order.Length + " in_book_order=" + inOrder +
+                                       " preview_blocks=" + _overlay.PreviewParts + " progress_events=" + _overlay.Reader.ProgressEvents);
+                        if (!inOrder)
+                        {
+                            AppStorage.Log("Selftest ocr: columns token order=" + string.Join(",", order));
+                            Fail(7, "column order"); return;
+                        }
+                        Native.PostMessage(_overlay.Handle, Native.WM_KEYDOWN, (IntPtr)(int)Keys.Escape, IntPtr.Zero);
+                        stage = 10;
+                        break;
+                    }
+                    case 10:
+                        if (_overlay != null) return;
+                        columns.Close();
+                        poll.Stop(); deadline.Stop();
+                        AppStorage.Log("Selftest ocr: ok=True");
+                        SelfTestExit(0);
+                        break;
                 }
             };
             var go = new Timer { Interval = 2000 };

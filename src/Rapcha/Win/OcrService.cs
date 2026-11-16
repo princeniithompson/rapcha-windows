@@ -21,6 +21,7 @@ namespace Rapcha.Win
         public sealed class Result
         {
             public OcrLayout Layout = new OcrLayout();
+            public PageLayout Page = new PageLayout();
             public string Problem = "";
             public string Language = "";
             public int Ms;
@@ -69,6 +70,7 @@ namespace Rapcha.Win
                             }
                             r.Layout.AddLine(words);
                         }
+                        r.Page = PageLayout.Analyze(r.Layout); // lines, columns and blocks in reading order
                     }
                 }
                 catch (Exception e)

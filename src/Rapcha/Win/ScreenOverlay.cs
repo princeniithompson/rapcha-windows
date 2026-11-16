@@ -44,6 +44,15 @@ namespace Rapcha.Win
         private Control _pressed = Control.None;
         private Font _font, _small;
 
+        // Preview of what the box snapped to: soft green outlines with numbers, then reading starts.
+        public const int PreviewMs = 600;
+        private List<SnapPart> _preview;
+        private bool _previewStrong;
+        private readonly System.Windows.Forms.Timer _previewTimer = new System.Windows.Forms.Timer { Interval = PreviewMs };
+        private List<OcrWord> _pendingWords;
+        public bool Previewing => _previewTimer.Enabled;
+        public int PreviewParts => _preview?.Count ?? 0;
+
         public string LastReadText { get; private set; } = "";
         public int HighlightMoves { get; private set; }
         public SpeechReader Reader => _reader;
@@ -76,6 +85,15 @@ namespace Rapcha.Win
             _font = new Font("Segoe UI", S(15), FontStyle.Regular, GraphicsUnit.Pixel);
             _small = new Font("Segoe UI Semibold", S(13), FontStyle.Regular, GraphicsUnit.Pixel);
             _anim.Tick += (s, e) => Animate();
+            _previewTimer.Tick += (s, e) =>
+            {
+                _previewTimer.Stop();
+                _previewStrong = false;
+                InvalidatePreview();
+                var words = _pendingWords;
+                _pendingWords = null;
+                if (words != null) ReadWords(words);
+            };
         }
 
         private float S(double dip) => (float)(dip * _dpi / 96.0);
@@ -87,15 +105,15 @@ namespace Rapcha.Win
         {
             _ocr = r;
             if (r.Problem.Length > 0) _status = r.Problem;
-            else if (r.Layout.WordCount == 0) _status = "No text found on this screen.";
+            else if (r.Page.WordCount == 0) _status = "No text found on this screen.";
             else _status = "";
             InvalidateBottom();
             if (_pendingTap.HasValue)
             {
                 var (x, y) = _pendingTap.Value;
                 _pendingTap = null;
-                var line = r.Layout.LineAt(x, y);
-                if (line != null) { _selector.Cancel(); ReadWords(line.Words.ToList()); }
+                var line = r.Page.LineAt(x, y);
+                if (line != null) { _selector.Cancel(); ReadLine(line); }
             }
         }
 
@@ -113,8 +131,50 @@ namespace Rapcha.Win
 
         public void ReadBox(Box box)
         {
+            CancelPreview();
+            LastReadText = "";
             if (_ocr == null) { Say("Still reading the screen. Try again in a moment."); return; }
-            ReadWords(_ocr.Layout.Select(box));
+            var parts = _ocr.Page.Snap(box);
+            AppStorage.Log("Overlay snap: blocks=" + parts.Count + " " + string.Join(",", parts.Select(p => p.Kind.ToString()[0] + ":" + (int)(p.AreaCoverage * 100) + "%/" + (int)(p.LineCoverage * 100) + "%")) +
+                           " words=" + parts.Sum(p => p.Words.Count));
+            if (parts.Count == 0) { Say(NoTextThere); return; }
+            Preview(parts);
+        }
+
+        private void ReadLine(TextLine line)
+        {
+            CancelPreview();
+            LastReadText = "";
+            var part = new SnapPart { Block = _ocr.Page.BlockOf(line), Kind = SnapKind.Lines, Box = line.Box };
+            part.Words.AddRange(line.Words);
+            Preview(new List<SnapPart> { part });
+        }
+
+        private void Preview(List<SnapPart> parts)
+        {
+            _reader?.Stop();
+            HideHighlight();
+            InvalidatePreview();
+            _preview = parts;
+            _previewStrong = true;
+            _pendingWords = PageLayout.WordsOf(parts);
+            InvalidatePreview();
+            _previewTimer.Stop();
+            _previewTimer.Start();
+        }
+
+        private void CancelPreview()
+        {
+            _previewTimer.Stop();
+            _pendingWords = null;
+            InvalidatePreview();
+            _preview = null;
+        }
+
+        private void InvalidatePreview()
+        {
+            if (_preview == null) return;
+            foreach (var p in _preview) Invalidate(BoxRect(p.Box.Inflate(S(8))));
         }
 
         private void ReadWords(List<OcrWord> words)
@@ -134,6 +194,7 @@ namespace Rapcha.Win
 
         private void Say(string message)
         {
+            CancelPreview();
             _spoken = null;
             LastReadText = message;
             _status = message;
@@ -168,6 +229,7 @@ namespace Rapcha.Win
             else if (_reader.Status == ReadState.Finished || _reader.Status == ReadState.Idle)
             {
                 HideHighlight();
+                if (!Previewing) { InvalidatePreview(); _preview = null; }
                 if (_reader.Status == ReadState.Finished && _status == LastReadText) _status = ""; // a spoken message is done
             }
             InvalidateBottom();
@@ -189,7 +251,7 @@ namespace Rapcha.Win
                 case Control.Back: _reader?.Skip(-ReadingPlan.SkipWords); break;
                 case Control.Forward: _reader?.Skip(ReadingPlan.SkipWords); break;
                 case Control.PlayPause: _reader?.TogglePause(); break;
-                case Control.Stop: _reader?.Stop(); HideHighlight(); break;
+                case Control.Stop: CancelPreview(); _reader?.Stop(); HideHighlight(); break;
                 case Control.Close: Close(); break;
             }
             ControlUsed?.Invoke(c);
@@ -246,7 +308,7 @@ namespace Rapcha.Win
                 if (HitControl(e.Location) == c) Use(c);
                 return;
             }
-            bool? word = _ocr == null ? (bool?)null : _ocr.Layout.LineAt(e.X, e.Y) != null;
+            bool? word = _ocr == null ? (bool?)null : _ocr.Page.LineAt(e.X, e.Y) != null;
             Selection(_selector.OnUp(e.X, e.Y, word));
         }
 
@@ -260,7 +322,7 @@ namespace Rapcha.Win
                     ReadBox(r.Box);
                     break;
                 case BoxSelector.Kind.TapWord:
-                    ReadWords(_ocr.Layout.LineAt(r.X, r.Y).Words.ToList());
+                    ReadLine(_ocr.Page.LineAt(r.X, r.Y));
                     break;
                 case BoxSelector.Kind.CornerSet:
                     if (_ocr == null) _pendingTap = (r.X, r.Y); // decide once OCR is ready: a word means "read its line"
@@ -274,7 +336,7 @@ namespace Rapcha.Win
             _selector.OnDown(b.X, b.Y);
             _selector.OnMove(b.X + b.W / 2, b.Y + b.H / 2);
             _selector.OnMove(b.Right, b.Bottom);
-            Selection(_selector.OnUp(b.Right, b.Bottom, _ocr?.Layout.LineAt(b.Right, b.Bottom) != null));
+            Selection(_selector.OnUp(b.Right, b.Bottom, _ocr?.Page.LineAt(b.Right, b.Bottom) != null));
         }
 
         public void SimulateTwoClicks(Box b)
@@ -292,17 +354,17 @@ namespace Rapcha.Win
         {
             _selector.Cancel();
             _selector.OnDown(x, y);
-            Selection(_selector.OnUp(x, y, _ocr?.Layout.LineAt(x, y) != null));
+            Selection(_selector.OnUp(x, y, _ocr?.Page.LineAt(x, y) != null));
         }
 
         // ---------------- Painting ----------------
 
         private void Animate()
         {
-            bool moving = _hlVisible && (DateTime.UtcNow - _hlMoved).TotalMilliseconds < 160;
+            bool moving = _hlVisible && (DateTime.UtcNow - _hlMoved).TotalMilliseconds < 110;
             if (_hlVisible)
             {
-                double t = Math.Min(1, (DateTime.UtcNow - _hlMoved).TotalMilliseconds / 140.0);
+                double t = Math.Min(1, (DateTime.UtcNow - _hlMoved).TotalMilliseconds / 90.0);
                 t = 1 - Math.Pow(1 - t, 3);
                 _hl = new Box(Lerp(_hlFrom.X, _hlTarget.X, t), Lerp(_hlFrom.Y, _hlTarget.Y, t), Lerp(_hlFrom.W, _hlTarget.W, t), Lerp(_hlFrom.H, _hlTarget.H, t));
                 var r = HighlightRect();
@@ -324,7 +386,7 @@ namespace Rapcha.Win
         private Rectangle BoxRect(Box b)
         {
             var r = Rectangle.FromLTRB((int)b.X, (int)b.Y, (int)Math.Ceiling(b.Right), (int)Math.Ceiling(b.Bottom));
-            r.Inflate(Si(10), Si(10));
+            r.Inflate(Si(16), Si(16));
             return r;
         }
 
@@ -364,6 +426,31 @@ namespace Rapcha.Win
                     using (var pen = new Pen(Green, S(3))) g.DrawPath(pen, path);
                 }
                 _lastBoxRect = BoxRect(b);
+            }
+
+            if (_preview != null)
+            {
+                int n = 0;
+                foreach (var p in _preview)
+                {
+                    n++;
+                    var b = p.Box.Inflate(S(5));
+                    var r = new RectangleF((float)b.X, (float)b.Y, (float)b.W, (float)b.H);
+                    using (var path = Rounded(r, S(12)))
+                    {
+                        using (var fill = new SolidBrush(Color.FromArgb(_previewStrong ? 34 : 14, Green))) g.FillPath(fill, path);
+                        using (var pen = new Pen(Color.FromArgb(_previewStrong ? 200 : 90, Green), S(_previewStrong ? 2 : 1.4))) g.DrawPath(pen, path);
+                    }
+                    if (_preview.Count > 1 || _previewStrong)
+                    {
+                        float d = S(20);
+                        var badge = new RectangleF(r.X - d * 0.4f, r.Y - d * 0.4f, d, d);
+                        using (var bb = new SolidBrush(Color.FromArgb(_previewStrong ? 235 : 150, Green))) g.FillEllipse(bb, badge);
+                        using (var ink = new SolidBrush(Color.FromArgb(15, 40, 20)))
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            g.DrawString(n.ToString(), _small, ink, badge, sf);
+                    }
+                }
             }
 
             if (_hlVisible)
@@ -490,6 +577,7 @@ namespace Rapcha.Win
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             _anim.Stop();
+            _previewTimer.Stop();
             if (_reader != null) { _reader.Changed -= OnReaderChanged; _reader.Dispose(); _reader = null; }
             base.OnFormClosed(e);
         }
@@ -499,6 +587,7 @@ namespace Rapcha.Win
             if (disposing)
             {
                 _anim.Dispose();
+                _previewTimer.Dispose();
                 _dark.Dispose();
                 _font.Dispose();
                 _small.Dispose();

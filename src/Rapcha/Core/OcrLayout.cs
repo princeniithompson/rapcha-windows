@@ -43,7 +43,9 @@ namespace Rapcha.Core
     {
         public string Text;
         public Box Box;
-        public int Line; // index into OcrLayout.Lines
+        public int Line;      // visual line id (OcrLayout line index, or PageLayout line id after analysis)
+        public int Block = -1; // PageLayout block (reading order), -1 if not analysed
+        public Box LineBox;   // the visual line's box (the highlight uses its height)
         public OcrWord(string text, Box box) { Text = text; Box = box; }
     }
 
@@ -166,8 +168,17 @@ namespace Rapcha.Core
                 if (i > 0) sb.Append(words[i].Line != words[i - 1].Line ? "\n" : " ");
                 _starts[i] = sb.Length;
                 sb.Append(words[i].Text);
+                // End of a heading, list item or card text: add a full stop (inside the same word) so the voice pauses.
+                bool blockEnd = i == words.Count - 1 || words[i + 1].Block != words[i].Block;
+                if (blockEnd && words[i].Block >= 0 && i < words.Count - 1 && !EndsSentence(words[i].Text)) sb.Append('.');
             }
             Text = sb.ToString();
+        }
+
+        private static bool EndsSentence(string w)
+        {
+            char c = w.Length > 0 ? w[w.Length - 1] : ' ';
+            return c == '.' || c == '!' || c == '?' || c == ':' || c == ';' || c == '…';
         }
 
         public int Count => _starts.Length;
@@ -183,24 +194,15 @@ namespace Rapcha.Core
         }
 
         /// <summary>
-        /// The box to highlight for a word: the word itself, or the whole line for short list-like lines
-        /// (three words or fewer), which reads better for menus and lists.
+        /// The box to highlight for a word: the word's own width, with its visual line's top and height so the
+        /// green box sits evenly on mixed text (card titles, capitals, descenders).
         /// </summary>
         public Box HighlightFor(int word)
         {
             if (Words.Count == 0) return new Box();
-            word = Math.Max(0, Math.Min(Words.Count - 1, word));
-            int line = Words[word].Line;
-            int first = word, last = word;
-            while (first > 0 && Words[first - 1].Line == line) first--;
-            while (last < Words.Count - 1 && Words[last + 1].Line == line) last++;
-            if (last - first + 1 <= 3)
-            {
-                var b = new Box();
-                for (int i = first; i <= last; i++) b = b.Union(Words[i].Box);
-                return b;
-            }
-            return Words[word].Box;
+            var w = Words[Math.Max(0, Math.Min(Words.Count - 1, word))];
+            if (w.LineBox.IsEmpty || w.LineBox.H > 2.5 * w.Box.H) return w.Box;
+            return new Box(w.Box.X, w.LineBox.Y, w.Box.W, w.LineBox.H);
         }
     }
 }
