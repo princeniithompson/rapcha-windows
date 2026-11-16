@@ -149,6 +149,15 @@ namespace Rapcha.Win
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable | ControlStyles.ResizeRedraw, true);
             BackColor = Color.White;
             TabStop = true;
+            AutoSize = true;            // the table sizes it through GetPreferredSize (DPI-aware)
+            Size = new Size(190, 34);
+            MinimumSize = new Size(150, 30);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Size = GetPreferredSize(Size.Empty);
         }
 
         public bool Capturing => _capturing;
