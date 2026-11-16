@@ -130,6 +130,25 @@ jobs:
           "## v12 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v12 self-test failed ($code)" }
 
+      - name: v13 self-test (multi-pass OCR on a video-like test screen, box semantics, tap on code, recall before/after, first word < 1.5 s, no rotating ring, white app icon, Settings Edit/Reset)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v13"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v13 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; throw "v13 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v13|Overlay|OCR|OneCore|Settings: select|Unhandled|Exception| at " | Select-Object -Last 90 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $recall = Join-Path $shots "ocr-recall.txt"
+          if (Test-Path $recall) { Get-Content $recall; "## v13 recall" >> $env:GITHUB_STEP_SUMMARY; Get-Content $recall | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY }
+          "v13 self-test exit code: $code (0 ok, 60 OCR unavailable, 61 two-line box, 62 list box, 63 tap on code, 64 small/coloured text, 65 first word too slow, 66 ring decoration changes, 67 icon, 68 Settings Edit/Done, 69 Settings Reset)"
+          "## v13 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v13 self-test failed ($code)" }
+
       - name: Upload main window screenshots
         if: always()
         uses: actions/upload-artifact@v4
