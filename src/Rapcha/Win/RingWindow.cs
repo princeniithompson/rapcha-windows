@@ -107,8 +107,6 @@ namespace Rapcha.Win
         public void ShowDocked()
         {
             _dock = AppStorage.LoadRing(out _device);
-            if (_dock.Edge == DockEdge.Top || _dock.Edge == DockEdge.Bottom) // older versions could dock there
-                _dock = new DockPosition(_dock.Fraction < 0.5 ? DockEdge.Left : DockEdge.Right, _dock.Edge == DockEdge.Top ? 0.1 : 0.9);
             PlaceFromDock();
             Show();
             KeepOnTop();

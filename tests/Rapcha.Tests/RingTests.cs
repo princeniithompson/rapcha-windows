@@ -32,6 +32,27 @@ namespace Rapcha.Tests
         }
 
         [Fact]
+        public void TopDockedRingHasTheBubbleBelowAndBottomDockedAbove()
+        {
+            BubblePlacement.Beside(new IntRect(600, 6, 56, 56), DockEdge.Top, 420, 120, Work, 12, out int x, out int y);
+            Assert.Equal(6 + 56 + 12, y);
+            Assert.Equal(600 + 28 - 210, x);
+            BubblePlacement.Beside(new IntRect(600, 666, 56, 56), DockEdge.Bottom, 420, 120, Work, 12, out _, out y);
+            Assert.Equal(666 - 12 - 120, y);
+        }
+
+        [Fact]
+        public void TopAndBottomFlipWhenThereIsNoRoom()
+        {
+            var shortWork = new IntRect(0, 0, 1366, 150);
+            BubblePlacement.Beside(new IntRect(600, 6, 56, 56), DockEdge.Top, 420, 120, shortWork, 12, out _, out int y);
+            Assert.InRange(y, 0, 150 - 120);
+            BubblePlacement.Beside(new IntRect(10, 80, 56, 56), DockEdge.Bottom, 420, 120, shortWork, 12, out int x, out y);
+            Assert.InRange(y, 0, 150 - 120);
+            Assert.Equal(0, x); // kept on screen at the left
+        }
+
+        [Fact]
         public void StaysOnScreenNearTheBottom()
         {
             BubblePlacement.Beside(new IntRect(6, 700, 56, 56), DockEdge.Left, 420, 120, Work, 12, out _, out int y);

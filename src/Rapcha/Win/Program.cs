@@ -25,6 +25,15 @@ namespace Rapcha.Win
                 Application.Run(new RapchaApp(selfTestRing: true));
                 return;
             }
+            if (args.Length >= 2 && args[0] == "--selftest-main")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new MainSelfTest(args[1]));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
             if (args.Length >= 2 && args[0] == "--selftest-ocr")
             {
@@ -57,7 +66,10 @@ namespace Rapcha.Win
 
                 LoadIcons();
                 Shortcuts.Ensure();
-                Application.Run(new RapchaApp());
+                // Every manual launch (double-click, Desktop/Start shortcut, a downloaded "Rapcha (4).exe") ends with the
+                // main window visible. "--autostart" (for a future sign-in start) stays quiet with just the ring.
+                bool autostart = Array.IndexOf(args, "--autostart") >= 0;
+                Application.Run(new RapchaApp(showMain: !autostart));
             }
             finally
             {

@@ -26,15 +26,22 @@ namespace Rapcha.Core
     /// </summary>
     public static class EdgeSnap
     {
-        /// <summary>Which side edge (left or right) is nearest to the ring's centre, and where along it.</summary>
+        /// <summary>Which of the four edges is nearest to the ring's centre, and where along it (where it was dropped).</summary>
         public static DockPosition Snap(IntRect workArea, int centerX, int centerY, int ringSize)
         {
             int cx = Clamp(centerX, workArea.X, workArea.Right);
             int cy = Clamp(centerY, workArea.Y, workArea.Bottom);
             int dLeft = cx - workArea.X;
             int dRight = workArea.Right - cx;
-            // Side edges only (left or right), never the middle; top and bottom would cover tabs and the taskbar.
-            DockEdge edge = dLeft <= dRight ? DockEdge.Left : DockEdge.Right;
+            int dTop = cy - workArea.Y;
+            int dBottom = workArea.Bottom - cy;
+            int min = Math.Min(Math.Min(dLeft, dRight), Math.Min(dTop, dBottom));
+
+            DockEdge edge;
+            if (min == dLeft) edge = DockEdge.Left;
+            else if (min == dRight) edge = DockEdge.Right;
+            else if (min == dTop) edge = DockEdge.Top;
+            else edge = DockEdge.Bottom;
 
             double fraction;
             if (edge == DockEdge.Left || edge == DockEdge.Right)

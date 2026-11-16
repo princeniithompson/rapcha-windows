@@ -88,6 +88,72 @@ namespace Rapcha.Win
             WriteAtomic(VocabPath, new UTF8Encoding(false).GetBytes(VocabularyList.ToText(terms)));
         }
 
+        // ---- Home page history (plain JSON; the text is never logged) ----
+        private static string HistoryPath => Path.Combine(Folder, "history.json");
+        private static readonly object HistoryLock = new object();
+
+        /// <summary>Raised (on the saving thread) after the history file changed.</summary>
+        public static event Action HistoryChanged;
+
+        public static TranscriptHistory LoadHistory()
+        {
+            lock (HistoryLock)
+            {
+                try { return File.Exists(HistoryPath) ? TranscriptHistory.FromJson(File.ReadAllText(HistoryPath, Encoding.UTF8)) : new TranscriptHistory(); }
+                catch (Exception e) { Log("History: could not read history.json (" + e.GetType().Name + "); starting empty"); return new TranscriptHistory(); }
+            }
+        }
+
+        public static void SaveHistory(TranscriptHistory history)
+        {
+            lock (HistoryLock)
+            {
+                try { WriteAtomic(HistoryPath, new UTF8Encoding(false).GetBytes(history.ToJson())); }
+                catch (Exception e) { Log("History: save failed (" + e.GetType().Name + ")"); return; }
+            }
+            HistoryChanged?.Invoke();
+        }
+
+        /// <summary>Adds one finished transcript (newest first) and saves.</summary>
+        public static void AddToHistory(string text)
+        {
+            TranscriptHistory h;
+            lock (HistoryLock)
+            {
+                h = LoadHistory();
+                if (h.Add(text, DateTime.UtcNow) == null) return;
+            }
+            SaveHistory(h);
+            Log("History: saved a transcript (" + h.Items.Count + " in history)");
+        }
+
+        // ---- Glow colour ----
+        private static string GlowPath => Path.Combine(Folder, "glow.txt");
+        private static int? _glow;
+        public static event Action GlowChanged;
+
+        public static int LoadGlowColor()
+        {
+            if (_glow.HasValue) return _glow.Value;
+            int v = GlowColors.Default;
+            try { if (File.Exists(GlowPath)) v = GlowColors.Parse(File.ReadAllText(GlowPath)); } catch { }
+            _glow = v;
+            return v;
+        }
+
+        public static void SaveGlowColor(int rgb)
+        {
+            rgb &= 0xFFFFFF;
+            try { WriteAtomic(GlowPath, Encoding.ASCII.GetBytes(GlowColors.Format(rgb))); }
+            catch (Exception e) { Log("Glow colour: save failed (" + e.GetType().Name + ")"); }
+            _glow = rgb;
+            Log("Glow colour: " + GlowColors.NameOf(rgb) + " " + GlowColors.Format(rgb));
+            GlowChanged?.Invoke();
+        }
+
+        /// <summary>Forgets the cached value (self-test: re-read from disk).</summary>
+        public static void ReloadGlowColor() => _glow = null;
+
         public static DockPosition LoadRing(out string deviceName)
         {
             deviceName = "";

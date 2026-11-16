@@ -14,14 +14,24 @@ namespace Rapcha.Tests
         [Theory]
         [InlineData(10, 500, DockEdge.Left)]
         [InlineData(1900, 500, DockEdge.Right)]
-        [InlineData(900, 5, DockEdge.Left)]       // side edges only: near the top still docks left or right
-        [InlineData(1000, 1030, DockEdge.Right)]
-        [InlineData(960, 520, DockEdge.Left)]     // dead centre still goes to an edge
+        [InlineData(900, 5, DockEdge.Top)]
+        [InlineData(900, 1030, DockEdge.Bottom)]
+        [InlineData(960, 520, DockEdge.Top)]      // dead centre still goes to an edge
         [InlineData(-300, 400, DockEdge.Left)]    // off screen is clamped
         [InlineData(3000, 400, DockEdge.Right)]
         public void SnapsToNearestEdge(int cx, int cy, DockEdge expected)
         {
             Assert.Equal(expected, EdgeSnap.Snap(Work, cx, cy, Ring).Edge);
+        }
+
+        [Fact]
+        public void DropPositionAlongTheEdgeIsKept()
+        {
+            var pos = EdgeSnap.Snap(Work, 1500, 1030, Ring);            // dropped near the bottom, right of centre
+            Assert.Equal(DockEdge.Bottom, pos.Edge);
+            EdgeSnap.Place(Work, pos, Ring, 6, out int x, out int y);
+            Assert.Equal(1040 - Ring - 6, y);
+            Assert.InRange(x, 1500 - Ring / 2 - 1, 1500 - Ring / 2 + 1);
         }
 
         [Fact]

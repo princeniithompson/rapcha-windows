@@ -7,15 +7,15 @@ using System.Windows.Forms;
 namespace Rapcha.Win
 {
     /// <summary>
-    /// While voice typing, outlines the text field the words will go into with the same blue / purple / green
-    /// glow as select to speak. Click-through, never takes focus, ~20 frames per second on four thin strips.
+    /// While voice typing, outlines the text field the words will go into with a rounded outline in the user's
+    /// glow colour (Settings → Glow colour). Click-through, never takes focus, ~20 frames per second on four thin strips.
     /// The field is looked up with UI Automation once at the start and then once a second (it may move or the
     /// user may click another field).
     /// </summary>
     public sealed class FieldIndicator : IDisposable
     {
-        public const int ThicknessDip = 7;
-        private readonly EdgeGlow _glow = new EdgeGlow(ThicknessDip, outward: true, intervalMs: 50);
+        public const int ThicknessDip = FieldGlow.GlowDip + 2;
+        private readonly FieldGlow _glow = new FieldGlow(50);
         private readonly Timer _refresh = new Timer { Interval = 1000 };
         private IntPtr _target;
         private int _session;
@@ -24,6 +24,8 @@ namespace Rapcha.Win
         public bool Active => _glow.Active;
         public Rectangle Outline { get; private set; }   // the field rect the glow surrounds (after clamping)
         public FieldInfo Last { get; private set; }
+        public FieldGlow Glow => _glow;
+        public Color Color { get => _glow.Color; set => _glow.Color = value; }
 
         public FieldIndicator()
         {
@@ -69,9 +71,8 @@ namespace Rapcha.Win
             var r = Clamp(info.Bounds, _target);
             if (r.Width < 6 || r.Height < 6) { Hide(keepTarget: true); return; }
             if (_glow.Active && r == Outline) return;
-            _glow.Hide();
             Outline = r;
-            _glow.Show(r, null);
+            _glow.Show(r);
         }
 
         /// <summary>

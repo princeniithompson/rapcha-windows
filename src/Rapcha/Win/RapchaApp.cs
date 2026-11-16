@@ -35,7 +35,7 @@ namespace Rapcha.Win
         private DateTime _startedAt;
         private bool _gotPreview;
         private bool _micHintShown;
-        private SettingsForm _settings;
+        private MainWindow _main;
 
         // Select to speak
         private readonly EdgeGlow _glow = new EdgeGlow();
@@ -49,18 +49,25 @@ namespace Rapcha.Win
         private Point _bubbleOffset;
         private bool _bubbleFollows;
 
-        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false)
+        /// <param name="showMain">A manual launch (double-click, shortcut): show the main window. Autostart stays quiet.</param>
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false)
         {
             _selfTestOcr = selfTestOcr;
             _selfTestRing = selfTestRing;
+            var open = new ToolStripMenuItem("Open Rapcha", null, (s, e) => OpenMain(MainWindow.Page.Home, null)) { Font = new Font(_menu.Font, FontStyle.Bold) };
+            _menu.Items.Add(open);
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
+            _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
             _tray.Icon = Program.SmallIcon;
             _tray.Text = "Rapcha - click the ring to talk";
             _tray.ContextMenuStrip = _menu;
             _tray.Visible = true;
-            _tray.DoubleClick += (s, e) => OpenSettings(null);
+            _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) OpenMain(MainWindow.Page.Home, null); };
+
+            ApplyGlowColor();
+            AppStorage.GlowChanged += ApplyGlowColor;
 
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
@@ -81,14 +88,14 @@ namespace Rapcha.Win
             _ring.RestAllowed = () => _phase == Phase.Idle && _overlay == null && !_bubble.Visible && !_ring.IsDragging;
             _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
             _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
-            _bubble.FixMicClicked += SettingsForm.OpenMicrophoneSettings;
+            _bubble.FixMicClicked += SettingsPage.OpenMicrophoneSettings;
             _hotkeys.HotkeyPressed += id => { if (id == EscHotkeyId) Cancel("Cancelled"); };
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
             InstanceManager.Listen(
                 onQuit: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Quit requested by a newer Rapcha"); ExitApp(); })); } catch { } },
-                onShow: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Show requested by a second launch: opening Settings"); _ring.ShowDocked(); OpenSettings(null); })); } catch { } });
+                onShow: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Show requested by a second launch: opening the main window"); _ring.ShowDocked(); OpenForLaunch(); })); } catch { } });
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
@@ -96,8 +103,24 @@ namespace Rapcha.Win
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (_selfTestRing) { RunRingSelfTest(); return; }
-            if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey()))
-                OpenSettings("Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.");
+            if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
+        }
+
+        private const string Welcome = "Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.";
+
+        /// <summary>A manual launch: the main window, on Settings with a welcome note if there is no key yet.</summary>
+        private void OpenForLaunch()
+        {
+            if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenMain(MainWindow.Page.Settings, Welcome);
+            else OpenMain(MainWindow.Page.Home, null);
+            AppStorage.Log("Main window shown (" + _main?.Current + ")");
+        }
+
+        private void ApplyGlowColor()
+        {
+            var c = GlowPicker.FromRgb(AppStorage.LoadGlowColor());
+            _glow.Color = c;
+            _field.Color = c;
         }
 
         private void OnRingMoved()
@@ -139,7 +162,7 @@ namespace Rapcha.Win
             }
 
             IntPtr fromOverlay = CloseOverlay(); // voice typing always wins over reading aloud
-            _settings?.PauseMeter();
+            _main?.Settings.PauseMeter();
             _target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
             var vocab = AppStorage.LoadVocabulary();
             int gen = ++_generation;
@@ -165,8 +188,8 @@ namespace Rapcha.Win
             if (problem != MicProblem.None)
             {
                 session.Dispose();
-                ShowLabel(SettingsForm.MicHelp(problem), 8000, true);
-                _settings?.ResumeMeter();
+                ShowLabel(SettingsPage.MicHelp(problem), 8000, true);
+                _main?.Settings.ResumeMeter();
                 return;
             }
 
@@ -275,6 +298,7 @@ namespace Rapcha.Win
                 _field.Hide();
             }
             AppStorage.Log("[s" + number + "] delivered: " + result);
+            if (result == TextDelivery.Result.Typed || result == TextDelivery.Result.Copied) AppStorage.AddToHistory(text); // Home page history; never logged
             await Task.Delay(900);
             if (gen != _generation) return;
             switch (result)
@@ -355,7 +379,7 @@ namespace Rapcha.Win
             _session = null;
             _recorder = null;
             _ring.State = RingState.Idle;
-            _settings?.ResumeMeter();
+            _main?.Settings.ResumeMeter();
         }
 
         private void ShowLabel(string text, int hideAfterMs, bool warning = false)
@@ -363,21 +387,25 @@ namespace Rapcha.Win
             _label.ShowText(text, _ring.RingBounds, _ring.Edge, Dpi, hideAfterMs, warning);
         }
 
-        private void OpenSettings(string message)
+        private void OpenSettings(string message) => OpenMain(MainWindow.Page.Settings, message);
+
+        /// <summary>Opens (or brings to the front) the main window on a page.</summary>
+        private void OpenMain(MainWindow.Page page, string message)
         {
-            if (_settings == null || _settings.IsDisposed)
+            if (_main == null || _main.IsDisposed)
             {
-                _settings = new SettingsForm(message);
-                _settings.FormClosed += (s, e) => _settings = null;
-                if (_phase != Phase.Idle) _settings.PauseMeter();
-                _settings.Show();
+                _main = new MainWindow(page, message);
+                var w = _main;
+                w.FormClosed += (s, e) => { if (_main == w) _main = null; };   // a closed modeless form is disposed; the ring keeps running
+                if (_phase != Phase.Idle) w.Settings.PauseMeter();
+                w.Show();
             }
-            else if (message != null)
+            else
             {
-                _settings.ShowMessage(message);
+                _main.ShowPage(page);
+                if (message != null) _main.ShowMessage(message);
             }
-            if (_settings.WindowState == FormWindowState.Minimized) _settings.WindowState = FormWindowState.Normal;
-            _settings.Activate();
+            _main.BringUp();
         }
 
         // ---------------- Select to speak (screen overlay) ----------------
@@ -678,12 +706,24 @@ namespace Rapcha.Win
                 return h == _ring.Handle || Native.GetAncestor(h, Native.GA_ROOT) == _ring.Handle;
             }
             Point Center(Rectangle r) => new Point(r.X + r.Width / 2, r.Y + r.Height / 2);
-            bool Docked() { var r = _ring.RingBounds; var wa = Screen.FromRectangle(r).WorkingArea; return (_ring.Edge == DockEdge.Left && r.X - wa.X < r.Width) || (_ring.Edge == DockEdge.Right && wa.Right - r.Right < r.Width); }
+            bool Docked()
+            {
+                var r = _ring.RingBounds; var wa = Screen.FromRectangle(r).WorkingArea;
+                switch (_ring.Edge)
+                {
+                    case DockEdge.Left: return r.X - wa.X < r.Width;
+                    case DockEdge.Right: return wa.Right - r.Right < r.Width;
+                    case DockEdge.Top: return r.Y - wa.Y < r.Height;
+                    default: return wa.Bottom - r.Bottom < r.Height;
+                }
+            }
             bool BesideRing()
             {
                 var b = _bubble.Area; var r = _ring.RingBounds; var wa = Screen.FromRectangle(r).WorkingArea;
                 bool onScreen = wa.Contains(b);
-                bool beside = (b.X >= r.Right || b.Right <= r.X) && b.Y < r.Bottom && b.Bottom > r.Y;
+                bool beside = (_ring.Edge == DockEdge.Left || _ring.Edge == DockEdge.Right)
+                    ? (b.X >= r.Right || b.Right <= r.X) && b.Y < r.Bottom && b.Bottom > r.Y
+                    : (b.Y >= r.Bottom || b.Bottom <= r.Y) && b.X < r.Right && b.Right > r.X;
                 return onScreen && beside;
             }
 
@@ -772,6 +812,32 @@ namespace Rapcha.Win
                         AppStorage.Log("Selftest ring: other_side edge=" + _ring.Edge + " bubble_beside=" + beside3);
                         _bubble.Close2();
                         if (!followed || !docked1 || !beside1 || !ringFollowed || !docked2 || !beside2 || !beside3) { Fail(15, "move together"); return; }
+                        // Four edges: dropped near the top or the bottom, the ring docks there, where it was dropped
+                        // along that edge (never the middle), and the bubble flips to stay on screen.
+                        bool four = true;
+                        foreach (var drop in new[] { new { Edge = DockEdge.Top, F = 0.28 }, new { Edge = DockEdge.Bottom, F = 0.72 }, new { Edge = DockEdge.Left, F = 0.2 }, new { Edge = DockEdge.Right, F = 0.8 } })
+                        {
+                            _ring.Wake();
+                            var wa4 = Screen.FromRectangle(_ring.RingBounds).WorkingArea;
+                            var rb = _ring.RingBounds;
+                            bool horizontal = drop.Edge == DockEdge.Top || drop.Edge == DockEdge.Bottom;
+                            int tx = horizontal ? wa4.X + (int)(wa4.Width * drop.F) : drop.Edge == DockEdge.Left ? wa4.X + rb.Width / 2 + 6 : wa4.Right - rb.Width / 2 - 6;
+                            int ty = !horizontal ? wa4.Y + (int)(wa4.Height * drop.F) : drop.Edge == DockEdge.Top ? wa4.Y + rb.Height / 2 + 6 : wa4.Bottom - rb.Height / 2 - 6;
+                            _ring.SimulateDrag(tx - (rb.X + rb.Width / 2), ty - (rb.Y + rb.Height / 2), release: true);
+                            var nb = _ring.RingBounds;
+                            int along = horizontal ? nb.X + nb.Width / 2 : nb.Y + nb.Height / 2;
+                            int want = horizontal ? tx : ty;
+                            bool edgeOk = _ring.Edge == drop.Edge && Docked();
+                            bool kept = Math.Abs(along - want) <= nb.Width / 2;
+                            _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+                            await Task.Delay(150);
+                            bool beside4 = BesideRing();
+                            _bubble.Close2();
+                            AppStorage.Log("Selftest ring: dock " + drop.Edge + " -> edge=" + _ring.Edge + " docked=" + edgeOk + " drop_at=" + want + " ring_at=" + along +
+                                           " kept_drop_position=" + kept + " bubble_beside_on_screen=" + beside4);
+                            four &= edgeOk && kept && beside4;
+                        }
+                        if (!four) { Fail(18, "four-edge docking"); return; }
                         Next(5);
                         break;
                     }
@@ -834,7 +900,7 @@ namespace Rapcha.Win
             go.Start();
         }
 
-        private static void SendClick(Point p)
+        internal static void SendClick(Point p)
         {
             var vs = SystemInformation.VirtualScreen;
             int ax = (int)Math.Round((p.X - vs.X) * 65535.0 / Math.Max(1, vs.Width - 1));
@@ -877,7 +943,7 @@ namespace Rapcha.Win
             _tray.Visible = false;
             _tray.Dispose();
             _hotkeys.Dispose();
-            _settings?.Close();
+            _main?.Close();
             _bubble.Close();
             _label.Close();
             _ring.Close();

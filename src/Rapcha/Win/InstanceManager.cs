@@ -38,8 +38,10 @@ namespace Rapcha.Win
 
             if (sameBuild)
             {
+                // This launch came from the user (it owns the foreground), so let the running copy take it.
+                foreach (var p in others) { try { Native.AllowSetForegroundWindow(p.Id); } catch { } }
                 Signal(ShowEventName);
-                AppStorage.Log("Startup: same build already running; asked it to show Settings");
+                AppStorage.Log("Startup: same build already running; asked it to show the main window");
                 return false;
             }
 

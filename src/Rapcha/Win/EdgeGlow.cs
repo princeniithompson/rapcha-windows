@@ -8,7 +8,7 @@ namespace Rapcha.Win
 {
     /// <summary>
     /// The select-to-speak overlay's glowing edge (like Circle to Search): click-through strips along the
-    /// edges of one monitor, a blue / purple / green gradient flowing around the screen with a brighter sweep.
+    /// edges of one monitor in the user's glow colour (Settings → Glow colour), with a brighter sweep flowing around.
     /// Owned by the overlay so it always stays above it. Pixels go straight into a DIB section (no GDI+),
     /// at most ~30 frames per second, and only while shown.
     /// </summary>
@@ -26,6 +26,9 @@ namespace Rapcha.Win
         public int WindowCount => _strips.Count;
 
         public Rectangle Bounds => _bounds;
+
+        /// <summary>The one glow colour (default: the ring's olive).</summary>
+        public Color Color { get; set; } = Color.FromArgb(0xA0, 0xBE, 0x3C);
 
         /// <param name="thicknessDip">Glow depth.</param>
         /// <param name="outward">false: glows inward from the edges of the bounds (the screen edge);
@@ -87,7 +90,8 @@ namespace Rapcha.Win
         {
             if (!Active) return;
             double time = (DateTime.UtcNow - _born).TotalSeconds;
-            foreach (var s in _strips) s.Render(time);
+            var c = Color;
+            foreach (var s in _strips) s.Render(time, c);
         }
 
         public void Dispose()
@@ -118,14 +122,7 @@ namespace Rapcha.Win
                 _along = new float[side == Side.Top || side == Side.Bottom ? _w : _h];
             }
 
-            private static readonly int[][] Palette =
-            {
-                new[] { 66, 133, 244 },   // blue
-                new[] { 160, 92, 255 },   // purple
-                new[] { 52, 199, 120 },   // green
-            };
-
-            public void Render(double time)
+            public void Render(double time, Color c)
             {
                 int n = _along.Length;
                 if (_rgb == null) _rgb = new int[n * 3];
@@ -136,15 +133,13 @@ namespace Rapcha.Win
                 {
                     int local = (_side == Side.Bottom || _side == Side.Left) ? n - 1 - i : i; // clockwise
                     double p = _perimeterStart + local;
-                    // colour flows around the edge
-                    double u = (p / _perimeter * 2.0 + time * 0.10) % 1.0; if (u < 0) u += 1;
-                    double seg = u * 3; int k = (int)seg; double f = seg - k;
-                    var c0 = Palette[k % 3]; var c1 = Palette[(k + 1) % 3];
-                    rgb[i * 3] = (int)(c0[0] + (c1[0] - c0[0]) * f);
-                    rgb[i * 3 + 1] = (int)(c0[1] + (c1[1] - c0[1]) * f);
-                    rgb[i * 3 + 2] = (int)(c0[2] + (c1[2] - c0[2]) * f);
                     double d = (sweep - p) % _perimeter; if (d < 0) d += _perimeter;
                     double trail = _perimeter * 0.22;
+                    // one colour, a little lighter in the sweep
+                    double lift = d < trail ? 0.25 * (1 - d / trail) : 0;
+                    rgb[i * 3] = (int)(c.R + (255 - c.R) * lift);
+                    rgb[i * 3 + 1] = (int)(c.G + (255 - c.G) * lift);
+                    rgb[i * 3 + 2] = (int)(c.B + (255 - c.B) * lift);
                     double v = 0.55 + 0.15 * breath + (d < trail ? 0.45 * (1 - d / trail) : 0);
                     _along[i] = (float)Math.Min(1.0, v);
                 }
