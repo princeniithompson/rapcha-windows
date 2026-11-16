@@ -59,6 +59,43 @@ jobs:
           if (Test-Path $piper) { throw "The old Piper folder was not deleted" }
           if ($code -ne 0) { throw "Overlay self-test failed ($code)" }
 
+      - name: Ring self-test (clickable hole, resting, wake tap, spinner, ring + bubble move together, field outline, no-field note)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $file = Join-Path $env:RUNNER_TEMP "rapcha-field.txt"
+          Set-Content -Path $file -Value "Field outline test" -NoNewline
+          $np = Start-Process notepad.exe -ArgumentList ('"' + $file + '"') -PassThru
+          Start-Sleep -Seconds 3
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest-ring' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; throw "Ring self-test hung" }
+          $code = $p.ExitCode
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ring|Ring |Unhandled|Exception" | Select-Object -Last 30 }
+          Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+          "Ring self-test exit code: $code (0 ok, 11 hole, 12 resting, 13 wake tap, 14 spinner, 15 move together, 16 field outline, 17 no-field note)"
+          "## Ring self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "Ring self-test failed ($code)" }
+
+      - name: Downloaded-file mark is removed on first run
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "motw"; New-Item -ItemType Directory -Force $dir | Out-Null
+          $copy = Join-Path $dir "Rapcha.exe"
+          Copy-Item "src/Rapcha/bin/Release/Rapcha.exe" $copy
+          Set-Content -Path $copy -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3`r`nHostUrl=https://github.com/"
+          if (-not (Get-Item $copy -Stream Zone.Identifier -ErrorAction SilentlyContinue)) { throw "Could not mark the test copy" }
+          $psi = New-Object System.Diagnostics.ProcessStartInfo($copy, "--selftest-unblock")
+          $psi.UseShellExecute = $false   # CreateProcess: no security prompt on the runner
+          $p = [System.Diagnostics.Process]::Start($psi)
+          if (-not $p.WaitForExit(30000)) { $p.Kill(); throw "Unblock run hung" }
+          $left = Get-Item $copy -Stream Zone.Identifier -ErrorAction SilentlyContinue
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          Get-Content $log | Select-String "downloaded-file mark" | Select-Object -Last 2
+          if ($left) { throw "Zone.Identifier is still there" }
+          "Mark-of-the-Web removed"
+
       - name: Paste self-test (Notepad, informational)
         continue-on-error: true
         shell: pwsh
@@ -100,6 +137,19 @@ jobs:
             $p2 = Start-Process -FilePath $exe -PassThru
             if (-not $p2.WaitForExit(10000)) { throw "Second launch of the same build did not exit" }
             if ($p1.HasExited) { throw "First instance died when the same build was launched again" }
+
+            # 2b. The Desktop shortcut while it runs: the running copy opens Settings, nothing else starts.
+            $desk0 = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "Rapcha.lnk"
+            $shows0 = @(Get-Content $log | Select-String "Show requested by a second launch").Count
+            Start-Process $desk0
+            Start-Sleep -Seconds 5
+            $shows1 = @(Get-Content $log | Select-String "Show requested by a second launch").Count
+            $count = @(Get-Process Rapcha -ErrorAction SilentlyContinue).Count
+            $titles = (Get-Process Rapcha -ErrorAction SilentlyContinue | ForEach-Object { $_.MainWindowTitle }) -join ", "
+            "Shortcut launch: show_requests $shows0 -> $shows1, Rapcha processes=$count, windows=[$titles]"
+            if ($shows1 -le $shows0) { throw "Launching the shortcut did not open Settings in the running copy" }
+            if ($count -ne 1) { throw "Launching the shortcut left $count Rapcha processes" }
+            if ($p1.HasExited) { throw "First instance died when the shortcut was launched" }
 
             # 3. A copy elsewhere counts as a different build: the running one quits cleanly via the signal.
             $newDir = Join-Path $env:RUNNER_TEMP "moved"; New-Item -ItemType Directory -Force $newDir | Out-Null
