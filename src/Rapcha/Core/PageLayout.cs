@@ -88,20 +88,25 @@ namespace Rapcha.Core
                 if (kept.Any(k => string.Equals(k.Text, l.Text, StringComparison.OrdinalIgnoreCase) && IoU(k.Box, l.Box) >= 0.5)) continue;
                 kept.Add(l);
             }
-            // Words that sit on top of a word of a longer line (another pass or slice read the same spot) go:
-            // otherwise a box over both lines would say them twice.
-            var byLength = kept.OrderByDescending(l => l.Words.Count).ToList();
-            var placed = new List<OcrWord>();
-            var empty = new HashSet<TextLine>();
-            foreach (var l in byLength)
+            // A whole second copy of a line (another pass or slice read the same spot, one word misread) goes, so a
+            // box over it doesn't say the line twice. Only whole copies: a line is never cut into pieces here.
             {
-                var keep = l.Words.Where(w => !placed.Any(p => Overlaps(p.Box, w.Box))).ToList();
-                if (keep.Count == l.Words.Count) { placed.AddRange(keep); continue; }
-                l.Words.Clear(); l.Words.AddRange(keep);
-                l.Box = keep.Aggregate(new Box(), (u, w) => u.Union(w.Box));
-                if (keep.Count == 0) empty.Add(l); else placed.AddRange(keep);
+                var byLength = kept.OrderByDescending(l => l.Words.Count).ThenByDescending(l => l.Box.W).ToList();
+                var drop = new HashSet<TextLine>();
+                for (int i = 0; i < byLength.Count; i++)
+                {
+                    var l = byLength[i];
+                    if (l.Words.Count == 0) continue;
+                    for (int j = 0; j < i; j++)
+                    {
+                        var k = byLength[j];
+                        if (drop.Contains(k) || IoU(k.Box, l.Box) < 0.3 && k.Box.Intersect(l.Box).Area < 0.8 * l.Box.Area) continue;
+                        int same = l.Words.Count(w => k.Words.Any(x => Overlaps(x.Box, w.Box)));
+                        if (same >= Math.Max(1, (int)Math.Ceiling(0.8 * l.Words.Count))) { drop.Add(l); break; }
+                    }
+                }
+                kept = kept.Where(l => !drop.Contains(l)).ToList();
             }
-            kept = kept.Where(l => !empty.Contains(l)).ToList();
             for (int i = 0; i < kept.Count; i++) kept[i].Id = i;
             page.Lines.AddRange(kept);
 

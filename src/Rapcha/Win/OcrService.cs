@@ -158,7 +158,9 @@ namespace Rapcha.Win
             double s1 = dpi >= 120 ? 1.0 : 1.5, s2 = dpi >= 120 ? 1.5 : 2.0;
             var full = new Rectangle(0, 0, src.W, src.H);
             int tile = TileWidth(dpi);
-            int band = (int)Math.Round(300 * Math.Max(96, dpi) / 96.0);    // short bands: each engine call is brief
+            // Full-height slices, as in v13: cutting lines across (short bands) made the engine read half-cut lines
+            // as junk. Each slice's engine call is cancelled when a selection starts, so the slices may be long.
+            int band = src.H;
             string X(double v) => v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "x";
             OcrPass Grid(double sc, Variant v, bool en, string name, int prio, int tw) => GridPass(src, full, sc, v, en, name, prio, tw, band, between, token);
             var jobs = new List<(string, Func<OcrPass>)>();
