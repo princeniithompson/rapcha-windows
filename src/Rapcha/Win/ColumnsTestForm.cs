@@ -11,7 +11,7 @@ namespace Rapcha.Win
     internal sealed class ColumnsTestForm : Form
     {
         /// <summary>Words that must be read in this order (column by column, like a book).</summary>
-        public static readonly string[] OrderTokens = { "Build", "Start", "Review", "hospital", "bill", "Should", "Spot", "Interactive", "remix", "Ecommerce", "Sell" };
+        public static readonly string[] OrderTokens = { "Build", "newest", "Review", "hospital", "bill", "Should", "Spot", "Interactive", "remix", "Ecommerce", "Sell" };
 
         public ColumnsTestForm()
         {

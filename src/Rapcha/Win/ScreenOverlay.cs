@@ -51,7 +51,7 @@ namespace Rapcha.Win
         private readonly System.Windows.Forms.Timer _previewTimer = new System.Windows.Forms.Timer { Interval = PreviewMs };
         private List<OcrWord> _pendingWords;
         public bool Previewing => _previewTimer.Enabled;
-        public int PreviewParts => _preview?.Count ?? 0;
+        public int PreviewParts { get; private set; }
 
         public string LastReadText { get; private set; } = "";
         public int HighlightMoves { get; private set; }
@@ -156,6 +156,7 @@ namespace Rapcha.Win
             HideHighlight();
             InvalidatePreview();
             _preview = parts;
+            PreviewParts = parts.Count;
             _previewStrong = true;
             _pendingWords = PageLayout.WordsOf(parts);
             InvalidatePreview();
