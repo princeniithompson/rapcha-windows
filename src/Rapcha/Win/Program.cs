@@ -14,14 +14,13 @@ namespace Rapcha.Win
         [STAThread]
         private static void Main()
         {
-            using (var mutex = new Mutex(true, @"Local\Rapcha.Windows.SingleInstance", out bool first))
+            // Same mutex name as v1/v2, so an old copy is always detected.
+            var mutex = new Mutex(false, InstanceManager.MutexName);
+            bool owned = false;
+            try
             {
-                if (!first)
-                {
-                    MessageBox.Show("Rapcha is already running. Look for the lifebuoy at the edge of your screen.", "Rapcha",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
+                owned = InstanceManager.AcquireOrHandOff(mutex);
+                if (!owned) return; // same build already running: it was asked to show itself
 
                 // .NET 4.8 defaults to SystemDefault, which lets Windows pick TLS 1.2 or 1.3.
                 // If something forced an explicit list, make sure TLS 1.2 is in it.
@@ -34,8 +33,13 @@ namespace Rapcha.Win
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Report(e.ExceptionObject as Exception);
 
                 LoadIcons();
+                Shortcuts.Ensure();
                 Application.Run(new RapchaApp());
-                GC.KeepAlive(mutex);
+            }
+            finally
+            {
+                if (owned) { try { mutex.ReleaseMutex(); } catch { } }
+                mutex.Dispose();
             }
         }
 
@@ -44,13 +48,15 @@ namespace Rapcha.Win
             try
             {
                 using (var s = typeof(Program).Assembly.GetManifestResourceStream("Rapcha.rapcha.ico"))
-                    AppIcon = new Icon(s);
+                    AppIcon = new Icon(s, 32, 32);
                 using (var s = typeof(Program).Assembly.GetManifestResourceStream("Rapcha.rapcha.ico"))
                     SmallIcon = new Icon(s, SystemInformation.SmallIconSize);
             }
-            catch
+            catch (Exception e)
             {
-                AppIcon = SmallIcon = SystemIcons.Application;
+                AppStorage.Log("Embedded icon failed (" + e.Message + "), using the exe icon");
+                try { AppIcon = SmallIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+                catch { AppIcon = SmallIcon = SystemIcons.Application; }
             }
         }
 

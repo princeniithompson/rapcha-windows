@@ -57,6 +57,9 @@ namespace Rapcha.Win
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
+            InstanceManager.Listen(
+                onQuit: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Quit requested by a newer Rapcha"); ExitApp(); })); } catch { } },
+                onShow: () => { try { _ring.BeginInvoke(new Action(() => { _ring.ShowDocked(); OpenSettings(null); })); } catch { } });
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
