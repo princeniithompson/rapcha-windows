@@ -28,6 +28,37 @@ jobs:
       - name: Unit tests
         run: dotnet test tests/Rapcha.Tests -c Release --nologo
 
+      - name: Cache the whisper engine
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: src/Rapcha/Assets/engine
+          key: whisper-x86-v1.9.5-${{ hashFiles('native/**') }}
+
+      - name: Build the whisper engine (whisper.cpp v1.9.5, one self-contained 32-bit DLL, AVX2 and SSE builds, embedded in Rapcha.exe)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "whisper.cpp"
+          git clone --depth 1 -b v1.9.5 https://github.com/ggml-org/whisper.cpp $src
+          if ($LASTEXITCODE -ne 0) { throw "could not get whisper.cpp" }
+          $engine = "src/Rapcha/Assets/engine"
+          New-Item -ItemType Directory -Force $engine | Out-Null
+          foreach ($v in @(@{ n = 'avx2'; f = 'ON' }, @{ n = 'sse'; f = 'OFF' })) {
+            $b = Join-Path $env:RUNNER_TEMP ("wb-" + $v.n)
+            cmake -S native -B $b -A Win32 ("-DWHISPER_DIR=" + $src.Replace('\','/')) "-DRAPCHA_AVX2=$($v.f)"
+            if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($($v.n))" }
+            cmake --build $b --config Release --target rapcha_whisper -j 4
+            if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($($v.n))" }
+            $dll = Get-ChildItem $b -Recurse -Filter "rapcha-whisper.dll" | Select-Object -First 1
+            if (-not $dll) { throw "rapcha-whisper.dll not built ($($v.n))" }
+            $out = Join-Path $engine ("rapcha-whisper-" + $v.n + ".dll.gz")
+            $in = [IO.File]::OpenRead($dll.FullName); $fs = [IO.File]::Create((Join-Path (Get-Location) $out))
+            $gz = New-Object IO.Compression.GZipStream($fs, [IO.Compression.CompressionLevel]::Optimal)
+            $in.CopyTo($gz); $gz.Dispose(); $fs.Dispose(); $in.Dispose()
+            "{0}: dll {1:N0} bytes, embedded gz {2:N0} bytes" -f $v.n, $dll.Length, (Get-Item $out).Length
+          }
+
       - name: Build Rapcha.exe
         run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
 
@@ -186,6 +217,25 @@ jobs:
           "v15 self-test exit code: $code (0 ok, 80 OCR unavailable, 81 badges, 82 Previous/Next order or highlight, 83 paused move, 84 Finished, 85 tap neighbours, 86 badges off changed reading, 87 keys taken while inactive, 88 latency, 89 settings toggle, 90 icon)"
           "## v15 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v15 self-test failed ($code)" }
+
+      - name: v16 self-test (device level, timer and Offline tag, Settings per level, Whisper Tiny download with SHA-256, cancel, whisper.cpp inside the exe, simulated S mode, built-in speech, switch to offline part-way, polish)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v16"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v16 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force; throw "v16 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v16|Whisper|whisper|Built-in speech|Offline|offline|Device|Settings|Unhandled|Exception| at " | Select-Object -Last 120 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $res = Join-Path $shots "v16-results.txt"
+          if (Test-Path $res) { Get-Content $res; "## v16 offline voice typing" >> $env:GITHUB_STEP_SUMMARY; Get-Content $res | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY }
+          "v16 self-test exit code: $code (0 ok, 91 tier, 92 timer / Offline tag, 93 settings, 94 download, 95 Whisper engine, 96 S mode fallback, 97 built-in speech, 98 fallback switch)"
+          "## v16 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v16 self-test failed ($code)" }
 
       - name: Upload main window screenshots
         if: always()
