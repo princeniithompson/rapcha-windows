@@ -31,17 +31,49 @@ jobs:
       - name: Build Rapcha.exe
         run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
 
-      - name: Smoke test (starts and stays running)
+      - name: Smoke test (start, single instance, update hand-off)
         shell: pwsh
         run: |
-          $exe = "src/Rapcha/bin/Release/Rapcha.exe"
-          $p = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 10
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
           $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
-          if (Test-Path $log) { Get-Content $log }
-          if ($p.HasExited) { throw "Rapcha.exe exited early with code $($p.ExitCode)" }
-          "Working set: {0:N1} MB" -f ($p.WorkingSet64 / 1MB)
-          Stop-Process -Id $p.Id -Force
+          try {
+            # 1. An old v1 is running (v1 does not listen for the quit signal): the new build must close it.
+            $oldDir = Join-Path $env:RUNNER_TEMP "v1"; New-Item -ItemType Directory -Force $oldDir | Out-Null
+            $oldExe = Join-Path $oldDir "Rapcha.exe"
+            Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/v1/Rapcha.exe" -OutFile $oldExe
+            $v1 = Start-Process -FilePath $oldExe -PassThru
+            Start-Sleep -Seconds 6
+            if ($v1.HasExited) { throw "v1 did not start" }
+            $p1 = Start-Process -FilePath $exe -PassThru
+            if (-not $v1.WaitForExit(15000)) { throw "The new build did not replace the running v1" }
+            Start-Sleep -Seconds 6
+            if ($p1.HasExited) { throw "Rapcha.exe exited early with code $($p1.ExitCode)" }
+            "Working set: {0:N1} MB" -f ((Get-Process -Id $p1.Id).WorkingSet64 / 1MB)
+
+            # 2. The same exe again: exits quietly (no message box) and leaves the first one running.
+            $p2 = Start-Process -FilePath $exe -PassThru
+            if (-not $p2.WaitForExit(10000)) { throw "Second launch of the same build did not exit" }
+            if ($p1.HasExited) { throw "First instance died when the same build was launched again" }
+
+            # 3. A copy elsewhere counts as a different build: the running one quits cleanly via the signal.
+            $newDir = Join-Path $env:RUNNER_TEMP "moved"; New-Item -ItemType Directory -Force $newDir | Out-Null
+            Copy-Item $exe (Join-Path $newDir "Rapcha.exe")
+            $p3 = Start-Process -FilePath (Join-Path $newDir "Rapcha.exe") -PassThru
+            if (-not $p1.WaitForExit(15000)) { throw "Old instance did not quit for the new one" }
+            Start-Sleep -Seconds 5
+            if ($p3.HasExited) { throw "New instance exited after taking over (code $($p3.ExitCode))" }
+
+            $desk = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "Rapcha.lnk"
+            $start = Join-Path ([Environment]::GetFolderPath('Programs')) "Rapcha.lnk"
+            if (-not (Test-Path $desk) -or -not (Test-Path $start)) { throw "Shortcuts were not created" }
+            $target = (New-Object -ComObject WScript.Shell).CreateShortcut($desk).TargetPath
+            "Desktop shortcut -> $target"
+            if ($target -ne (Join-Path $newDir "Rapcha.exe")) { throw "Shortcut was not refreshed after the exe moved" }
+            Stop-Process -Id $p3.Id -Force
+          }
+          finally {
+            if (Test-Path $log) { Get-Content $log }
+          }
 
       - name: Publish release
         shell: pwsh
