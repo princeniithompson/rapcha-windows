@@ -40,7 +40,7 @@ namespace Rapcha.Win
             if (_silentOutput) _synth.SetOutputToWaveStream(new MemoryStream());
             else _synth.SetOutputToDefaultAudioDevice();
             VoiceName = _synth.Voice?.Name ?? "";
-            _synth.Rate = Math.Max(-10, Math.Min(10, (int)Math.Round((PiperVoice.Speed - 1.0) * 10)));
+            _synth.Rate = VoiceSettings.SapiRate;
             _synth.SpeakProgress += OnProgress;
             _synth.SpeakCompleted += OnCompleted;
             return _synth;
@@ -95,6 +95,7 @@ namespace Rapcha.Win
             CurrentWord = word;
             _baseChar = Plan.Words[word].Start;
             var synth = Synth();
+            synth.Rate = VoiceSettings.SapiRate;
             _prompt = synth.SpeakAsync(Plan.TextFrom(word));
             Status = ReadState.Playing;
             Changed?.Invoke();

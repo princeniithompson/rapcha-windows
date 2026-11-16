@@ -15,29 +15,14 @@ namespace Rapcha.Win
         private static void Main(string[] args)
         {
             if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
-            if (args.Length >= 2 && args[0] == "--selftest-piper")
-            {
-                try { Environment.ExitCode = SelfTest.Piper(args[1]); }
-                catch (Exception e) { AppStorage.Log("Selftest piper: " + e); Environment.ExitCode = 1; }
-                return;
-            }
-            if (args.Length >= 2 && args[0] == "--selftest-click")
-            {
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
-                LoadIcons();
-                Application.Run(new RapchaApp(selfTestClick: args[1]));
-                return;
-            }
-            if (args.Length >= 2 && args[0] == "--selftest-speak")
+            if (args.Length >= 2 && args[0] == "--selftest-ocr")
             {
                 // Runs beside any other copy (no single-instance hand-off, no shortcuts).
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
                 LoadIcons();
-                Application.Run(new RapchaApp(args[1]));
+                Application.Run(new RapchaApp(selfTestOcr: args[1]));
                 return;
             }
 

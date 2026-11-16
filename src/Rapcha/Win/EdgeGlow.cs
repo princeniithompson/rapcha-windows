@@ -1,19 +1,22 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Drawing;
 using System.Windows.Forms;
 
 namespace Rapcha.Win
 {
     /// <summary>
-    /// The select-to-speak "mode is on" glow: thin click-through strips along every screen edge,
-    /// a soft breathing olive/cream base with two bright light trails running around the edge.
-    /// Pixels are written straight into a DIB section (no GDI+), about 30 frames per second,
-    /// and the timer only runs while the glow is shown.
+    /// The select-to-speak overlay's glowing edge (like Circle to Search): click-through strips along the
+    /// edges of one monitor, a blue / purple / green gradient flowing around the screen with a brighter sweep.
+    /// Owned by the overlay so it always stays above it. Pixels go straight into a DIB section (no GDI+),
+    /// at most ~30 frames per second, and only while shown.
     /// </summary>
     public sealed class EdgeGlow : IDisposable
     {
-        private const int ThicknessDip = 9;
+        private const int ThicknessDip = 12;
+        private Rectangle _bounds;
+        private Form _owner;
         private readonly List<Strip> _strips = new List<Strip>();
         private readonly Timer _timer = new Timer { Interval = 33 };
         private readonly DateTime _born = DateTime.UtcNow;
@@ -27,13 +30,15 @@ namespace Rapcha.Win
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         }
 
-        public void Show()
+        public void Show(Rectangle bounds, Form owner)
         {
             if (Active) return;
             Active = true;
+            _bounds = bounds;
+            _owner = owner;
             Build();
             RenderAll();
-            foreach (var s in _strips) { s.Show(); s.KeepOnTop(); }
+            foreach (var s in _strips) { if (owner != null) s.Owner = owner; s.Show(); s.KeepOnTop(); }
             _timer.Start();
         }
 
@@ -50,14 +55,13 @@ namespace Rapcha.Win
         {
             if (!Active) return;
             Hide();
-            Show();
+            Show(_bounds, _owner);
         }
 
         private void Build()
         {
-            foreach (var screen in Screen.AllScreens)
             {
-                var b = screen.Bounds;
+                var b = _bounds;
                 int dpi = Native.DpiAt(b.X + b.Width / 2, b.Y + b.Height / 2);
                 int t = Math.Max(4, (int)Math.Round(ThicknessDip * dpi / 96.0));
                 int per = 2 * (b.Width + b.Height);
@@ -91,6 +95,7 @@ namespace Rapcha.Win
             private readonly Side _side;
             private readonly int[] _pixels;
             private readonly float[] _along;
+            private int[] _rgb;
             private IntPtr _dib, _bits, _memDc, _oldObj;
 
             public Strip(int x, int y, int w, int h, Side side, int perimeterStart, int perimeter) : base(true)
@@ -101,42 +106,52 @@ namespace Rapcha.Win
                 _along = new float[side == Side.Top || side == Side.Bottom ? _w : _h];
             }
 
+            private static readonly int[][] Palette =
+            {
+                new[] { 66, 133, 244 },   // blue
+                new[] { 160, 92, 255 },   // purple
+                new[] { 52, 199, 120 },   // green
+            };
+
             public void Render(double time)
             {
-                // Intensity along the strip: breathing base plus two light trails 180 degrees apart.
-                double breath = 0.5 + 0.5 * Math.Sin(time * 2 * Math.PI / 2.4);
-                double head = (time * 0.11 % 1.0) * _perimeter;
-                double trail = _perimeter * 0.16;
                 int n = _along.Length;
+                if (_rgb == null) _rgb = new int[n * 3];
+                var rgb = _rgb;
+                double sweep = (time * 0.18 % 1.0) * _perimeter;
+                double breath = 0.5 + 0.5 * Math.Sin(time * 2 * Math.PI / 2.6);
                 for (int i = 0; i < n; i++)
                 {
                     int local = (_side == Side.Bottom || _side == Side.Left) ? n - 1 - i : i; // clockwise
                     double p = _perimeterStart + local;
-                    double v = 0.30 + 0.14 * breath;
-                    for (int k = 0; k < 2; k++)
-                    {
-                        double h = head + k * _perimeter / 2.0;
-                        double d = (h - p) % _perimeter; if (d < 0) d += _perimeter; // distance behind the head
-                        if (d < trail) { double f = 1 - d / trail; v += 0.75 * f * f; }
-                    }
+                    // colour flows around the edge
+                    double u = (p / _perimeter * 2.0 + time * 0.10) % 1.0; if (u < 0) u += 1;
+                    double seg = u * 3; int k = (int)seg; double f = seg - k;
+                    var c0 = Palette[k % 3]; var c1 = Palette[(k + 1) % 3];
+                    rgb[i * 3] = (int)(c0[0] + (c1[0] - c0[0]) * f);
+                    rgb[i * 3 + 1] = (int)(c0[1] + (c1[1] - c0[1]) * f);
+                    rgb[i * 3 + 2] = (int)(c0[2] + (c1[2] - c0[2]) * f);
+                    double d = (sweep - p) % _perimeter; if (d < 0) d += _perimeter;
+                    double trail = _perimeter * 0.22;
+                    double v = 0.55 + 0.15 * breath + (d < trail ? 0.45 * (1 - d / trail) : 0);
                     _along[i] = (float)Math.Min(1.0, v);
                 }
 
-                // Pixel colours: olive at rest, warming to cream where the trail passes; fade inward.
                 for (int y = 0; y < _h; y++)
                 {
                     for (int x = 0; x < _w; x++)
                     {
-                        float a = (_side == Side.Top || _side == Side.Bottom) ? _along[x] : _along[y];
+                        bool horiz = _side == Side.Top || _side == Side.Bottom;
+                        int i = horiz ? x : y;
                         int depth = _side == Side.Top ? y : _side == Side.Bottom ? _h - 1 - y : _side == Side.Left ? x : _w - 1 - x;
-                        int thick = (_side == Side.Top || _side == Side.Bottom) ? _h : _w;
+                        int thick = horiz ? _h : _w;
                         float fade = 1f - depth / (float)thick;
                         fade *= fade;
-                        float alpha = a * fade;
-                        float warm = Math.Max(0f, (a - 0.45f) / 0.55f);
-                        int r = (int)(150 + (255 - 150) * warm), g = (int)(190 + (241 - 190) * warm), b = (int)(60 + (201 - 60) * warm);
-                        int A = (int)(alpha * 235);
-                        // premultiplied BGRA
+                        float a = _along[i] * fade;
+                        // a whiter core right at the edge
+                        float white = depth < thick / 4 ? 0.35f * _along[i] : 0f;
+                        int r = (int)(rgb[i * 3] + (255 - rgb[i * 3]) * white), g = (int)(rgb[i * 3 + 1] + (255 - rgb[i * 3 + 1]) * white), b = (int)(rgb[i * 3 + 2] + (255 - rgb[i * 3 + 2]) * white);
+                        int A = (int)(a * 245);
                         _pixels[y * _w + x] = (A << 24) | ((r * A / 255) << 16) | ((g * A / 255) << 8) | (b * A / 255);
                     }
                 }

@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Rapcha.Core;
@@ -38,23 +39,11 @@ namespace Rapcha.Win
 
         // Select to speak
         private readonly EdgeGlow _glow = new EdgeGlow();
-        private readonly SelectionWatcher _watcher = new SelectionWatcher();
-        private readonly ReadingCard _card = new ReadingCard();
-        private IReadAloud _reader;
-        private bool _piperBroken;
-        private readonly bool _selfTestNoDownload;
-        private readonly Timer _readerIdle = new Timer { Interval = 5 * 60 * 1000 }; // free piper after 5 idle minutes
-        private bool _selectMode;
-        private int _captureGeneration;
-        private readonly string _selfTestSpeak;
+        private readonly string _selfTestOcr;
 
-        private readonly string _selfTestClick;
-
-        public RapchaApp(string selfTestSpeak = null, string selfTestClick = null)
+        public RapchaApp(string selfTestOcr = null)
         {
-            _selfTestSpeak = selfTestSpeak;
-            _selfTestClick = selfTestClick;
-            _selfTestNoDownload = selfTestSpeak != null || selfTestClick != null;
+            _selfTestOcr = selfTestOcr;
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
@@ -66,22 +55,7 @@ namespace Rapcha.Win
 
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
-            _ring.DoubleClicked += () => SetSelectMode(!_selectMode);
-            _watcher.DragSelection += OnDragSelection;
-            _watcher.PointClicked += OnPointClicked;
-            _readerIdle.Tick += (s, e) =>
-            {
-                if (_reader == null) { _readerIdle.Stop(); return; }
-                if (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing) return; // check again later
-                _readerIdle.Stop();
-                AppStorage.Log("Voice idle for 5 minutes: engine freed");
-                _card.Close2();
-                DisposeReader();
-            };
-            PiperVoice.StatusChanged += OnVoiceStatusChanged;
-            PiperVoice.Refresh();
-            _watcher.EscapePressed += () => { if (_selectMode && _phase == Phase.Idle) SetSelectMode(false); };
-            _card.ButtonClicked += OnCardButton;
+            _ring.DoubleClicked += ToggleOverlay;
             _ring.Moved += () => { if (_label.Visible) _label.HideNow(); };
             _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
             _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
@@ -96,8 +70,8 @@ namespace Rapcha.Win
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
-            if (_selfTestSpeak != null) { RunSpeakSelfTest(); return; }
-            if (_selfTestClick != null) { RunClickSelfTest(); return; }
+            _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
+            if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey()))
                 OpenSettings("Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.");
         }
@@ -129,10 +103,9 @@ namespace Rapcha.Win
                 return;
             }
 
-            StopReading(); // voice typing always wins over reading aloud
-            _watcher.Stop(); // no input hooks while dictating and pasting (they must never be starved)
+            IntPtr fromOverlay = CloseOverlay(); // voice typing always wins over reading aloud
             _settings?.PauseMeter();
-            _target = TextDelivery.CaptureTarget();
+            _target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
             var vocab = AppStorage.LoadVocabulary();
             int gen = ++_generation;
             int number = ++_sessionNumber;
@@ -159,7 +132,6 @@ namespace Rapcha.Win
                 session.Dispose();
                 ShowLabel(SettingsForm.MicHelp(problem), 8000, true);
                 _settings?.ResumeMeter();
-                ResumeSelectWatch();
                 return;
             }
 
@@ -225,13 +197,12 @@ namespace Rapcha.Win
             text = (text ?? "").Trim();
             LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
-            ResetToIdle(resumeWatch: false);
+            ResetToIdle();
 
             if (text.Length == 0)
             {
                 var reason = EmptyReason(recorder, session);
                 AppStorage.Log("[s" + number + "] empty result shown as: " + reason);
-                ResumeSelectWatch();
                 _bubble.Set(WordsBubble.Mode.Warning, reason);
                 await Task.Delay(reason == Messages.NothingHeard ? 2000 : 5000);
                 if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
@@ -241,7 +212,6 @@ namespace Rapcha.Win
             _bubble.Set(WordsBubble.Mode.Final, text);
             var result = TextDelivery.Deliver(text, _target);
             AppStorage.Log("[s" + number + "] delivered: " + result);
-            ResumeSelectWatch();
             await Task.Delay(900);
             if (gen != _generation) return;
             switch (result)
@@ -313,12 +283,7 @@ namespace Rapcha.Win
             if (err.Kind == LiveErrorKind.BadKey || err.Kind == LiveErrorKind.MissingKey) OpenSettings(msg);
         }
 
-        private void ResumeSelectWatch()
-        {
-            if (_selectMode && _phase == Phase.Idle) _watcher.Start();
-        }
-
-        private void ResetToIdle(bool resumeWatch = true)
+        private void ResetToIdle()
         {
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
@@ -327,7 +292,6 @@ namespace Rapcha.Win
             _recorder = null;
             _ring.State = RingState.Idle;
             _settings?.ResumeMeter();
-            if (resumeWatch) ResumeSelectWatch();
         }
 
         private void ShowLabel(string text, int hideAfterMs, bool warning = false)
@@ -352,333 +316,203 @@ namespace Rapcha.Win
             _settings.Activate();
         }
 
-        // ---------------- Select to speak ----------------
+        // ---------------- Select to speak (screen overlay) ----------------
 
-        private void SetSelectMode(bool on)
+        private ScreenOverlay _overlay;
+        private IntPtr _overlayPrevious;
+        private int _overlayGeneration;
+
+        private void ToggleOverlay()
         {
-            if (on == _selectMode) return;
-            _selectMode = on;
-            _ring.SelectMode = on;
-            if (on)
-            {
-                _glow.Show();
-                _watcher.Start();
-                _ring.KeepOnTop();
-                AppStorage.Log("Select to speak on: screens=" + Screen.AllScreens.Length + " glow_windows=" + _glow.WindowCount +
-                               " voice=" + PiperVoice.Status + (PiperVoice.UnsupportedReason() != null ? " (" + PiperVoice.UnsupportedReason() + ")" : ""));
-                string msg = "Select to speak is on. Click any text or icon to hear it (clicks only read while this is on). Double-click the ring or press Esc to stop.";
-                if (!_selfTestNoDownload && !PiperVoice.IsInstalled && PiperVoice.UnsupportedReason() == null)
-                {
-                    _ = PiperVoice.EnsureInstalledAsync();
-                    msg += " Downloading the natural voice, one time, " + PiperVoice.DownloadSizeText + ".";
-                }
-                ShowLabel(msg, 5000);
-            }
-            else
-            {
-                _captureGeneration++;
-                _watcher.Stop();
-                _glow.Hide();
-                StopReading();
-                DisposeReader(); // frees the voice engine (and piper's memory) while the mode is off
-                AppStorage.Log("Select to speak off");
-                ShowLabel("Select to speak is off", 1500);
-            }
+            if (_overlay != null) { CloseOverlay(); return; }
+            if (_phase != Phase.Idle) return; // never while dictating
+            OpenOverlay();
         }
 
-        private void DisposeReader()
+        private void OpenOverlay()
         {
-            _readerIdle.Stop();
-            _reader?.Dispose();
-            _reader = null;
-            _card.Attach(null);
-        }
-
-        /// <summary>Piper when it is installed (and not known broken this session), otherwise the Windows voice.</summary>
-        private IReadAloud Reader()
-        {
-            bool wantPiper = PiperVoice.IsInstalled && !_piperBroken;
-            if (_reader != null && (_reader is PiperReader) != wantPiper) DisposeReader();
-            if (_reader == null)
-            {
-                if (wantPiper)
-                {
-                    var pr = new PiperReader(_selfTestNoDownload ? new ClockPlayer() : null);
-                    pr.Failed += OnPiperFailed;
-                    _reader = pr;
-                }
-                else _reader = new SpeechReader(_selfTestNoDownload);
-                _card.Attach(_reader);
-            }
-            return _reader;
-        }
-
-        private void OnPiperFailed(string why, int atWord)
-        {
-            _piperBroken = true; // for this session; the next start tries Piper again
-            var text = _reader?.Plan?.Text;
-            DisposeReader();
-            if (string.IsNullOrEmpty(text) || !_selectMode) return;
-            _card.Note = "Natural voice stopped working. Using the Windows voice.";
-            StartReading(text, atWord);
-        }
-
-        private string _lastReadText = "";
-
-        private async void OnDragSelection(SelectionWatcher.Drag drag)
-        {
-            if (!_selectMode || _phase != Phase.Idle) return;
-            int gen = ++_captureGeneration;
-            await Task.Delay(120); // let the app finish updating its selection
-            if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle) return;
-
-            var fg = Native.GetForegroundWindow();
-            if (!TextDelivery.IsUsableTarget(fg)) return; // our own windows, the desktop, the taskbar
-            // A drag that started on a title bar, border, menu or scroll bar is not a selection.
-            if (drag.DownWindow != IntPtr.Zero && Native.IsWindow(drag.DownWindow))
-            {
-                var pt = new Native.POINT(drag.Gesture.DownX, drag.Gesture.DownY);
-                try { Native.PhysicalToLogicalPointForPerMonitorDPI(drag.DownWindow, ref pt); } catch { }
-                var lp = (IntPtr)(((pt.Y & 0xFFFF) << 16) | (pt.X & 0xFFFF));
-                if (Native.SendMessageTimeout(drag.DownWindow, Native.WM_NCHITTEST, IntPtr.Zero, lp, Native.SMTO_ABORTIFHUNG, 200, out var hit) != IntPtr.Zero)
-                {
-                    long h = hit.ToInt64();
-                    bool frame = h == 2 || h == 3 || (h >= 5 && h <= 17) || h == 20 || h == 21; // caption, sysmenu, menu, scroll bars, buttons, borders, close, help
-                    if (frame) { AppStorage.Log("Selection: ignored drag on window frame (hit=" + h + ")"); return; }
-                }
-            }
-
-            string text;
-            try { text = await SelectionReader.GetAsync(fg, allowClipboard: drag.TextCursor); }
-            catch (Exception e) { AppStorage.Log("Selection failed: " + e.GetType().Name); return; }
-            if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle) return;
-            if (string.IsNullOrWhiteSpace(text)) return; // nothing selected: stay quiet
-            bool stillReading = _reader != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing || _reader.Status == ReadState.Paused);
-            if (text == _lastReadText && stillReading) return; // same selection already being read
-            StartReading(text);
-        }
-
-        /// <summary>A swallowed click in select-to-speak mode: read whatever is under it.</summary>
-        private async void OnPointClicked(int x, int y)
-        {
-            if (!_selectMode || _phase != Phase.Idle) return;
-            int gen = ++_captureGeneration;
-            var why = new System.Text.StringBuilder();
-            Uia.PointRead r;
-            try { r = await Uia.TextAtPointAsync(x, y, 1500, why); }
-            catch (Exception e) { AppStorage.Log("Point read failed: " + e.GetType().Name); r = new Uia.PointRead(); }
-            if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle || r.Own) return;
-            LastPointRead = r;
-            AppStorage.Log("Point: type=" + r.ControlType + " source=" + r.Source + " chars=" + r.Text.Length + " " + why.ToString().Trim());
-            StartReading(r.Text.Length > 0 ? r.Text : PointText.NoText);
-        }
-
-        internal Uia.PointRead LastPointRead { get; private set; }
-
-        private void StartReading(string text, int startWord = 0)
-        {
-            _lastReadText = text;
+            var screen = Screen.FromRectangle(_ring.RingBounds);
+            var bounds = screen.Bounds;
+            int dpi = Native.DpiAt(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2);
             _label.HideNow();
-            _readerIdle.Stop();
-            _readerIdle.Start();
-            _card.Open(_ring.RingBounds, _ring.Edge, Dpi);
+            _overlayPrevious = Native.GetForegroundWindow();
+            var started = DateTime.UtcNow;
+            Bitmap shot;
             try
             {
-                var r = Reader();
-                if (!(r is PiperReader)) _card.Note = FallbackNote();
-                else if (_card.Note.StartsWith("Natural voice") || _card.Note.StartsWith("Downloading")) _card.Note = "";
-                r.Read(text, startWord);
-                AppStorage.Log("Reading: words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count + " engine=" + (r is PiperReader ? "piper" : "sapi") + " voice=\"" + r.VoiceName + "\"");
+                shot = new Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(shot))
+                    g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
             }
             catch (Exception e)
             {
-                AppStorage.Log("Speech start failed: " + e.GetType().Name + " " + e.Message);
-                bool wasPiper = _reader is PiperReader;
-                DisposeReader();
-                if (wasPiper) { OnPiperFailedAtStart(text, startWord); return; }
-                _card.ShowStatus(SpeechReader.CountVoices() == 0 ? "No Windows voice is installed." : "No speaker found. Check your sound output.");
+                AppStorage.Log("Screen capture failed: " + e.GetType().Name);
+                ShowLabel("Couldn't capture the screen. Try again.", 3000, true);
+                return;
             }
-        }
 
-        private void OnPiperFailedAtStart(string text, int startWord)
-        {
-            _piperBroken = true;
-            _card.Note = "Natural voice couldn't start. Using the Windows voice.";
-            StartReading(text, startWord);
-        }
+            int gen = ++_overlayGeneration;
+            var overlay = new ScreenOverlay(bounds, shot, dpi, _selfTestOcr != null);
+            _overlay = overlay;
+            overlay.FormClosed += (s, e) => OnOverlayClosed(overlay);
+            overlay.Show();
+            overlay.Activate();
+            _glow.Show(bounds, overlay);
+            _ring.SelectMode = true;
+            _ring.KeepOnTop();
+            AppStorage.Log("Overlay open: " + bounds.Width + "x" + bounds.Height + " dpi=" + dpi + " screens=" + Screen.AllScreens.Length +
+                           " glow_windows=" + _glow.WindowCount + " capture_ms=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
 
-        private string FallbackNote()
-        {
-            switch (PiperVoice.Status)
+            Task<OcrService.Result> ocr;
+            try { ocr = OcrService.RecognizeAsync(shot, dpi); } // copies the pixels before returning
+            finally { shot.Dispose(); }
+            ocr.ContinueWith(t =>
             {
-                case PiperVoice.State.Downloading: return "Downloading voice, one time, " + PiperVoice.DownloadSizeText + " · " + PiperVoice.Percent + "% · Windows voice for now";
-                case PiperVoice.State.Failed: return "No internet for the natural voice. Using the Windows voice.";
-                case PiperVoice.State.Unsupported: return "Using the Windows voice (natural voice not supported here).";
-                default: return _piperBroken ? "Using the Windows voice." : "";
-            }
-        }
-
-        private void OnVoiceStatusChanged()
-        {
-            try
-            {
-                _ring.BeginInvoke(new Action(() =>
+                var r = t.Status == TaskStatus.RanToCompletion ? t.Result : new OcrService.Result { Problem = "Couldn't read the screen. Try again." };
+                try
                 {
-                    if (_card.Visible && _reader != null && !(_reader is PiperReader)) _card.Note = FallbackNote();
-                    _settings?.UpdateVoiceStatus();
-                }));
-            }
-            catch { }
+                    _ring.BeginInvoke(new Action(() =>
+                    {
+                        if (gen != _overlayGeneration || _overlay != overlay || overlay.IsDisposed) return;
+                        overlay.SetOcr(r);
+                        _ring.KeepOnTop();
+                    }));
+                }
+                catch { }
+            });
         }
 
-        private void StopReading()
+        /// <summary>Closes the overlay (if open) and gives focus back. Returns the window that had focus before it.</summary>
+        private IntPtr CloseOverlay()
         {
-            _reader?.Stop();
-            _card.Close2();
+            if (_overlay == null) return IntPtr.Zero;
+            var prev = _overlayPrevious;
+            _overlay.Close(); // OnOverlayClosed does the cleanup
+            return prev;
         }
 
-        private void OnCardButton(ReadingCard.Button b)
+        private void OnOverlayClosed(ScreenOverlay overlay)
         {
-            if (_reader == null) { if (b == ReadingCard.Button.Stop) _card.Close2(); return; }
-            switch (b)
-            {
-                case ReadingCard.Button.PlayPause: _reader.TogglePause(); break;
-                case ReadingCard.Button.Back: _reader.Skip(-ReadingPlan.SkipWords); break;
-                case ReadingCard.Button.Forward: _reader.Skip(ReadingPlan.SkipWords); break;
-                case ReadingCard.Button.Stop: StopReading(); break;
-            }
+            if (_overlay != overlay) return;
+            _overlay = null;
+            _overlayGeneration++;
+            _glow.Hide();
+            _ring.SelectMode = false;
+            var prev = _overlayPrevious;
+            _overlayPrevious = IntPtr.Zero;
+            if (prev != IntPtr.Zero && Native.IsWindow(prev)) Native.SetForegroundWindow(prev);
+            overlay.Dispose();
+            // The screenshot copies and OCR results are large: give the memory back now (4 GB laptops).
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect();
+            AppStorage.Log("Overlay closed: managed_mb=" + (GC.GetTotalMemory(false) / (1024 * 1024)));
+            _ring.KeepOnTop();
         }
 
         /// <summary>
-        /// CI hook (--selftest-speak "text"): toggles the mode on like a double-click, reads the text with whichever
-        /// voice the app would choose (Piper if installed, else the Windows voice) into a silent clock instead of the
-        /// speakers, checks word progress, toggles off, exits. Exit codes: 0 ok, 2 no voice at all, 1 failure.
+        /// CI hook (--selftest-ocr "quick brown fox"): with Notepad showing a known first line (and a second line
+        /// that must not be read), opens the overlay like a double-click on the ring, waits for OCR, checks the
+        /// words were found, then selects the first line with a drag, with two corner clicks, and with a tap on a
+        /// word, each read with the Windows voice into a silent stream. Finally presses Esc and checks the
+        /// overlay and glow are gone. Exit: 0 ok, 2 no voice, 3 OCR/words missing, 4 selection/reading wrong,
+        /// 5 close failed, 6 OCR unavailable, 1 other/timeout.
         /// </summary>
-        private void RunSpeakSelfTest()
+        private void RunOcrSelfTest()
         {
+            var expected = _selfTestOcr.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
             int voices = SpeechReader.CountVoices();
-            AppStorage.Log("Selftest speak: sapi_voices=" + voices + " piper_installed=" + PiperVoice.IsInstalled);
-            if (voices == 0 && !PiperVoice.IsInstalled) { SelfTestExit(2); return; }
-            var deadline = new Timer { Interval = 90000 };
-            deadline.Tick += (s, e) => { deadline.Stop(); AppStorage.Log("Selftest speak: timed out"); SelfTestExit(1); };
-            deadline.Start();
-            var go = new Timer { Interval = 1500 };
-            go.Tick += (s, e) =>
+            AppStorage.Log("Selftest ocr: sapi_voices=" + voices);
+            if (voices == 0) { SelfTestExit(2); return; }
+            int stage = 0;
+            OcrLine line = null;
+            var poll = new Timer { Interval = 150 };
+            var deadline = new Timer { Interval = 120000 };
+            deadline.Tick += (s, e) => { deadline.Stop(); poll.Stop(); AppStorage.Log("Selftest ocr: timed out at stage " + stage); SelfTestExit(1); };
+            void Fail(int code, string why) { poll.Stop(); deadline.Stop(); AppStorage.Log("Selftest ocr: FAIL " + why); SelfTestExit(code); }
+            bool Done() => _overlay.Reader != null && _overlay.Reader.Status == ReadState.Finished;
+            bool Check(string how)
             {
-                go.Stop();
-                _ring.SimulateDoubleClick();
-                if (!_selectMode || !_glow.Active || !_watcher.Running) { AppStorage.Log("Selftest speak: mode did not turn on"); SelfTestExit(1); return; }
-                StartReading(_selfTestSpeak);
-                var r = _reader;
-                if (r == null) { SelfTestExit(1); return; }
-                bool skipped = false;
-                r.Changed += () =>
-                {
-                    // Exercise Forward 10 once mid-way on long texts.
-                    if (!skipped && r.Plan.Words.Count > 25 && r.CurrentWord >= 3 && r.Status == ReadState.Playing) { skipped = true; r.Skip(ReadingPlan.SkipWords); AppStorage.Log("Selftest speak: forward 10 -> word " + r.CurrentWord); }
-                    if (r.Status != ReadState.Finished) return;
-                    deadline.Stop();
-                    var pr = r as PiperReader;
-                    bool ok = r.ProgressEvents > 0 && r.CurrentWord == r.Plan.Words.Count - 1 && (pr == null || pr.PcmBytes > 0);
-                    AppStorage.Log("Selftest speak: finished engine=" + (pr != null ? "piper" : "sapi") + " words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count +
-                                   " progress_events=" + r.ProgressEvents + (pr != null ? " segments=" + pr.Segments + " pcm_bytes=" + pr.PcmBytes : "") +
-                                   " voice=\"" + r.VoiceName + "\" ok=" + ok);
-                    _ring.SimulateDoubleClick();
-                    bool off = !_selectMode && !_glow.Active && !_watcher.Running;
-                    AppStorage.Log("Selftest speak: mode off=" + off);
-                    SelfTestExit(ok && off ? 0 : 1);
-                };
-            };
-            go.Start();
-        }
-
-        /// <summary>
-        /// CI hook (--selftest-click "expected words"): with Notepad open on a known file, turns the mode on, clicks
-        /// (synthetic) on Notepad's first line and checks that the line was read while Notepad's text and caret
-        /// did not change (the click was swallowed). Then minimizes all windows, clicks blank desktop space and
-        /// expects "No text found at that location." Exit: 0 ok, 3 Notepad check failed, 4 desktop check failed, 1 other.
-        /// </summary>
-        private void RunClickSelfTest()
-        {
-            int stage = 0, notepadResult = -1;
-            IntPtr edit = IntPtr.Zero;
-            string textBefore = "";
-            long selBefore = 0;
-            DateTime stageAt = DateTime.UtcNow;
-            var poll = new Timer { Interval = 200 };
-            var deadline = new Timer { Interval = 60000 };
-            deadline.Tick += (s, e) => { deadline.Stop(); poll.Stop(); AppStorage.Log("Selftest click: timed out at stage " + stage); SelfTestExit(stage <= 1 ? 3 : 4); };
-
-            void Click(int x, int y) { LastPointRead = null; stageAt = DateTime.UtcNow; SelectionWatcher.SendTestClick(x, y); }
-            bool ReadDone() => LastPointRead != null && _reader != null && _reader.Status == ReadState.Finished && !_card.Visible;
+                var text = _overlay.LastReadText;
+                bool all = expected.All(w => text.IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0);
+                bool second = text.IndexOf("second", StringComparison.OrdinalIgnoreCase) >= 0;
+                var r = _overlay.Reader;
+                AppStorage.Log("Selftest ocr: " + how + " expected_found=" + all + " second_line_read=" + second + " words=" + r.Plan.Words.Count +
+                               " progress_events=" + r.ProgressEvents + " last_word=" + r.CurrentWord + " highlight_moves=" + _overlay.HighlightMoves + " voice=\"" + r.VoiceName + "\"");
+                return all && !second && r.ProgressEvents > 0 && r.CurrentWord == r.Plan.Words.Count - 1 && _overlay.HighlightMoves > 0;
+            }
 
             poll.Tick += (s, e) =>
             {
                 switch (stage)
                 {
                     case 0:
-                    {
+                        foreach (var p in System.Diagnostics.Process.GetProcessesByName("notepad"))
+                            if (p.MainWindowHandle != IntPtr.Zero) { Native.SetForegroundWindow(p.MainWindowHandle); break; }
                         _ring.SimulateDoubleClick();
-                        SelectionWatcher.AcceptInjectedForTest = true;
-                        IntPtr np = IntPtr.Zero;
-                        foreach (var p in System.Diagnostics.Process.GetProcessesByName("notepad")) if (p.MainWindowHandle != IntPtr.Zero) { np = p.MainWindowHandle; break; }
-                        edit = np == IntPtr.Zero ? IntPtr.Zero : Native.FindWindowEx(np, IntPtr.Zero, "Edit", null);
-                        if (edit == IntPtr.Zero) { AppStorage.Log("Selftest click: no classic Notepad Edit window"); poll.Stop(); SelfTestExit(3); return; }
-                        Native.SetForegroundWindow(np);
-                        textBefore = GetWindowText(edit);
-                        Native.SendMessage(edit, Native.EM_SETSEL, (IntPtr)textBefore.Length, (IntPtr)textBefore.Length);
-                        selBefore = Native.SendMessage(edit, Native.EM_GETSEL, IntPtr.Zero, IntPtr.Zero).ToInt64();
-                        Native.GetWindowRect(edit, out var r);
-                        AppStorage.Log("Selftest click: mode=" + _selectMode + " notepad chars=" + textBefore.Length + " sel=" + selBefore + " clicking first line");
-                        Click(r.Left + 40, r.Top + 12);
+                        if (_overlay == null || !_glow.Active) { Fail(1, "overlay did not open"); return; }
                         stage = 1;
                         break;
-                    }
                     case 1:
-                        if (!ReadDone()) return;
                     {
-                        string read = _reader.Plan?.Text ?? "";
-                        bool readOk = read.IndexOf(_selfTestClick, StringComparison.OrdinalIgnoreCase) >= 0;
-                        string textAfter = GetWindowText(edit);
-                        long selAfter = Native.SendMessage(edit, Native.EM_GETSEL, IntPtr.Zero, IntPtr.Zero).ToInt64();
-                        bool untouched = textAfter == textBefore && selAfter == selBefore;
-                        AppStorage.Log("Selftest click: notepad read_ok=" + readOk + " read_chars=" + read.Length + " type=" + LastPointRead.ControlType +
-                                       " source=" + LastPointRead.Source + " notepad_untouched=" + untouched + " sel_after=" + selAfter +
-                                       " swallowed=" + _watcher.Swallowed + " card_closed=" + !_card.Visible);
-                        notepadResult = readOk && untouched ? 0 : 3;
-                        var tray = Native.FindWindow("Shell_TrayWnd", null);
-                        if (tray != IntPtr.Zero) Native.PostMessage(tray, Native.WM_COMMAND, (IntPtr)419, IntPtr.Zero); // minimize all windows
-                        stageAt = DateTime.UtcNow;
+                        var r = _overlay.Ocr;
+                        if (r == null) return;
+                        AppStorage.Log("Selftest ocr: ocr_ms=" + r.Ms + " lang=" + r.Language + " scale=" + r.Scale + " lines=" + r.Layout.Lines.Count + " words=" + r.Layout.WordCount +
+                                       (r.Problem.Length > 0 ? " problem=yes" : ""));
+                        if (r.Problem == OcrService.NoLanguage) { Fail(6, "no OCR language"); return; }
+                        line = r.Layout.Lines.FirstOrDefault(l => l.Words.Any(w => string.Equals(w.Text.Trim('.', ','), expected[0], StringComparison.OrdinalIgnoreCase)));
+                        bool found = line != null && expected.All(x => line.Words.Any(w => string.Equals(w.Text.Trim('.', ','), x, StringComparison.OrdinalIgnoreCase)));
+                        AppStorage.Log("Selftest ocr: expected words on one line=" + found + (line != null ? " line_box=" + line.Box : ""));
+                        if (!found) { Fail(3, "expected words not recognised"); return; }
+                        _overlay.SimulateDrag(line.Box.Inflate(4));
                         stage = 2;
                         break;
                     }
                     case 2:
-                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 1500) return;
-                    {
-                        var wa = Screen.PrimaryScreen.WorkingArea;
-                        int x = wa.X + wa.Width / 2, y = wa.Bottom - 120;
-                        AppStorage.Log("Selftest click: clicking blank desktop at " + x + "," + y);
-                        Click(x, y);
+                        if (!Done()) return;
+                        if (!Check("drag")) { Fail(4, "drag"); return; }
+                        _overlay.SimulateTwoClicks(line.Box.Inflate(4));
                         stage = 3;
                         break;
-                    }
                     case 3:
-                        if (!ReadDone()) return;
+                        if (!Done()) return;
+                        if (!Check("two_clicks")) { Fail(4, "two clicks"); return; }
                     {
-                        string read = _reader.Plan?.Text ?? "";
-                        bool ok = read == PointText.NoText;
-                        AppStorage.Log("Selftest click: desktop no_text_ok=" + ok + " type=" + LastPointRead.ControlType + " source=" + LastPointRead.Source +
-                                       " read_chars=" + read.Length + " card_closed=" + !_card.Visible);
+                        var w = line.Words[Math.Min(1, line.Words.Count - 1)].Box;
+                        _overlay.SimulateTap(w.CenterX, w.CenterY);
+                    }
+                        stage = 4;
+                        break;
+                    case 4:
+                        if (!Done()) return;
+                        if (!Check("tap")) { Fail(4, "tap"); return; }
+                        // Empty space far from any text: "No text found there."
+                        _overlay.SimulateDrag(new Box(_overlay.ClientSize.Width - 260, _overlay.ClientSize.Height / 2, 200, 40));
+                        stage = 5;
+                        break;
+                    case 5:
+                        if (!Done()) return;
+                    {
+                        bool none = _overlay.LastReadText == ScreenOverlay.NoTextThere;
+                        AppStorage.Log("Selftest ocr: empty box no_text=" + none);
+                        if (!none) { Fail(4, "empty box"); return; }
+                        var ov = _overlay;
+                        Native.PostMessage(ov.Handle, Native.WM_KEYDOWN, (IntPtr)(int)Keys.Escape, IntPtr.Zero);
+                        stage = 6;
+                        break;
+                    }
+                    case 6:
+                    {
+                        if (_overlay != null) return;
+                        bool closed = !_glow.Active && Application.OpenForms.OfType<ScreenOverlay>().Count() == 0;
+                        bool piperGone = !System.IO.Directory.Exists(VoiceSettings.PiperFolder);
+                        AppStorage.Log("Selftest ocr: closed=" + closed + " piper_folder_gone=" + piperGone + " ok=" + (closed && piperGone));
                         poll.Stop(); deadline.Stop();
-                        SelectionWatcher.AcceptInjectedForTest = false;
-                        _ring.SimulateDoubleClick();
-                        AppStorage.Log("Selftest click: mode off=" + (!_selectMode && !_watcher.Running));
-                        SelfTestExit(notepadResult != 0 ? notepadResult : ok ? 0 : 4);
+                        SelfTestExit(closed && piperGone ? 0 : 5);
                         break;
                     }
                 }
             };
-            var go = new Timer { Interval = 1500 };
+            var go = new Timer { Interval = 2000 };
             go.Tick += (s, e) => { go.Stop(); deadline.Start(); poll.Start(); };
             go.Start();
         }
@@ -701,11 +535,8 @@ namespace Rapcha.Win
 
         private void ExitApp()
         {
-            _watcher.Dispose();
+            CloseOverlay();
             _glow.Dispose();
-            PiperVoice.StatusChanged -= OnVoiceStatusChanged;
-            DisposeReader();
-            _card.Close();
             Cancel(null);
             _tray.Visible = false;
             _tray.Dispose();

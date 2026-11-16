@@ -30,45 +30,6 @@ namespace Rapcha.Win
             return result == TextDelivery.Result.Copied ? 3 : 1;
         }
 
-        /// <summary>
-        /// --selftest-piper "text": downloads and verifies Piper + the voice (pinned SHA-256), starts the engine,
-        /// synthesizes two phrases and checks for real PCM. 0 = ok, 1 = failed.
-        /// </summary>
-        public static int Piper(string text)
-        {
-            var sw = Stopwatch.StartNew();
-            int lastPct = -10;
-            PiperVoice.StatusChanged += () =>
-            {
-                if (PiperVoice.Status == PiperVoice.State.Downloading && PiperVoice.Percent >= lastPct + 10) { lastPct = PiperVoice.Percent; AppStorage.Log("Selftest piper: download " + lastPct + "%"); }
-            };
-            PiperVoice.EnsureInstalledAsync().GetAwaiter().GetResult();
-            AppStorage.Log("Selftest piper: status=" + PiperVoice.Status + " installed=" + PiperVoice.IsInstalled + " seconds=" + (int)sw.Elapsed.TotalSeconds +
-                           (PiperVoice.Problem.Length > 0 ? " problem=" + PiperVoice.Problem : ""));
-            if (!PiperVoice.IsInstalled) return 1;
-            using (var engine = new PiperEngine())
-            {
-                engine.Start(PiperVoice.Speed);
-                var plan = Rapcha.Core.ReadingPlan.Create(text);
-                int ok = 0;
-                for (int ph = 0; ph < Math.Min(2, plan.Phrases.Count); ph++)
-                {
-                    var t0 = Stopwatch.StartNew();
-                    var task = engine.SynthesizeAsync(plan.PhraseText(ph));
-                    if (!task.Wait(60000)) { AppStorage.Log("Selftest piper: synth timed out"); return 1; }
-                    var wav = task.Result;
-                    double secs = wav.Pcm.Length / 2.0 / wav.SampleRate;
-                    int peak = 0;
-                    for (int i = 0; i + 1 < wav.Pcm.Length; i += 2) peak = Math.Max(peak, Math.Abs((int)BitConverter.ToInt16(wav.Pcm, i)));
-                    AppStorage.Log("Selftest piper: phrase " + (ph + 1) + " rate=" + wav.SampleRate + " pcm_bytes=" + wav.Pcm.Length + " audio_s=" + secs.ToString("0.00") +
-                                   " synth_ms=" + t0.ElapsedMilliseconds + " peak=" + peak);
-                    if (wav.Pcm.Length > 4000 && peak > 1000) ok++;
-                }
-                AppStorage.Log("Selftest piper: piper_peak_working_set_mb=" + (engine.PeakWorkingSetBytes / 1048576));
-                return ok >= 1 && ok == Math.Min(2, plan.Phrases.Count) ? 0 : 1;
-            }
-        }
-
         private static IntPtr FindEditor(IntPtr top)
         {
             foreach (var cls in new[] { "Edit", "RichEditD2DPT", "RICHEDIT50W" })

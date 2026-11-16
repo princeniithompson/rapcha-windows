@@ -5,7 +5,7 @@ namespace Rapcha.Win
 {
     public enum ReadState { Idle, Preparing, Playing, Paused, Finished }
 
-    /// <summary>What the reading card needs from a voice (Piper or the Windows voice).</summary>
+    /// <summary>What the overlay needs from a voice (the Windows voice).</summary>
     public interface IReadAloud : IDisposable
     {
         ReadingPlan Plan { get; }

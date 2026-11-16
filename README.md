@@ -31,9 +31,9 @@ Click **Cancel**, right-click the ring, or press **Esc** while it is listening t
 
 ## Select to speak
 
-Double-click the ring to turn it on (the screen edges glow). While it is on, select to speak has the upper hand: **click any text, icon or button** and Rapcha reads it aloud instead of the click going to the app (for example, clicking the VLC icon on the desktop reads "VLC media player"). Clicking empty space says "No text found at that location." Dragging over text still selects it and reads the selection. Clicks on Rapcha itself and right clicks work as usual. When reading ends the card closes; click again to read something else. Double-click the ring again or press Esc to turn it off.
+Double-click the ring. The screen freezes, dims a little and its edges glow, like Circle to Search. **Drag a box around any text** (a bright green box follows your mouse or touchpad), or **click one corner and then the other**, or **tap a word** to hear its whole line. Rapcha reads exactly the text inside the box and a green box moves along word by word. Use **Back 10**, **Pause/Play**, **Forward 10** and **Stop** at the bottom (or Space and the arrow keys). When reading ends you can draw another box. Press **Esc**, click the **X**, or double-click the ring to go back. If there is no text in the box it says "No text found there."
 
-The first time, Rapcha downloads its natural offline voice once (Piper with the "Lessac" US English voice, about 86 MB) to `%AppData%\Rapcha\piper`. Every file is checked against a pinned SHA-256. Until it is ready, or if there is no internet, the built-in Windows voice is used. Settings shows the voice status and a speed slider.
+Text is found with the offline text recognition built into Windows, and read with the built-in Windows voice. Nothing is downloaded and nothing leaves your PC. Settings has a reading speed slider. (Older versions downloaded a Piper voice to `%AppData%\Rapcha\piper`; Rapcha now deletes it to free the space.)
 
 ## For developers
 
