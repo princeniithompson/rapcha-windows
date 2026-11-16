@@ -303,8 +303,10 @@ namespace Rapcha.Win
             _down = true; _dragging = false; _downScreen = _lastScreen = start;
             DragTo(new Point(start.X + dx / 2, start.Y + dy / 2));
             DragTo(new Point(start.X + dx, start.Y + dy));
-            if (release) { _down = false; if (_dragging) { _dragging = false; DragEnded?.Invoke(); } }
+            if (release) SimulateRelease();
         }
+
+        public void SimulateRelease() { _down = false; if (_dragging) { _dragging = false; DragEnded?.Invoke(); } }
 
         private static GraphicsPath Rounded(Rectangle r, int diameter)
         {

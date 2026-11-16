@@ -760,7 +760,7 @@ namespace Rapcha.Win
                         var r0 = _ring.RingBounds; var b0 = _bubble.Area;
                         _bubble.SimulateDrag(-200, -90, release: false);
                         bool ringFollowed = _ring.RingBounds.X - r0.X == _bubble.Area.X - b0.X && _ring.RingBounds.Y - r0.Y == _bubble.Area.Y - b0.Y && _bubble.Area.X != b0.X;
-                        _bubble.SimulateDrag(0, 0, release: true);
+                        _bubble.SimulateRelease();
                         bool docked2 = Docked(), beside2 = BesideRing();
                         AppStorage.Log("Selftest ring: ring_follows_bubble=" + ringFollowed + " ring_docked=" + docked2 + " edge=" + _ring.Edge + " bubble_beside=" + beside2);
                         // Dragging the ring across to the other side flips the bubble to stay on screen.
