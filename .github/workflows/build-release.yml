@@ -168,6 +168,25 @@ jobs:
           "## v14 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v14 self-test failed ($code)" }
 
+      - name: v15 self-test (Previous / Next by paragraph and list item with keys and buttons; 1.5 s restart; paused; Finished; tap neighbours; latency; number badges outside text, toggle; keys left alone when not reading; icon)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v15"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v15 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(360000)) { Stop-Process -Id $p.Id -Force; throw "v15 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v15|Overlay nav|Overlay latency|Voices|OneCore|Shortcuts|Settings|Unhandled|Exception| at " | Select-Object -Last 120 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $res = Join-Path $shots "v15-results.txt"
+          if (Test-Path $res) { Get-Content $res; "## v15 Previous / Next and badges" >> $env:GITHUB_STEP_SUMMARY; Get-Content $res >> $env:GITHUB_STEP_SUMMARY }
+          "v15 self-test exit code: $code (0 ok, 80 OCR unavailable, 81 badges, 82 Previous/Next order or highlight, 83 paused move, 84 Finished, 85 tap neighbours, 86 badges off changed reading, 87 keys taken while inactive, 88 latency, 89 settings toggle, 90 icon)"
+          "## v15 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v15 self-test failed ($code)" }
+
       - name: Upload main window screenshots
         if: always()
         uses: actions/upload-artifact@v4
