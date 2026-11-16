@@ -29,6 +29,8 @@ namespace Rapcha.Win
         private readonly PillButton _delete = new PillButton { Text = "Delete model" };
         private readonly ProgressBar _progress = new ProgressBar { Width = 330, Height = 14, Maximum = 1000, Style = ProgressBarStyle.Continuous };
         private readonly Label _whisperNote = Note("");
+        private readonly PillButton _anyway = new PillButton { Text = "Download lightest model anyway" };
+        private readonly FlowLayoutPanel _anywayRow;
         private readonly CheckBox _polish = new CheckBox { Text = "Offline smart polish (small model)", AutoSize = true, Enabled = false };
         private readonly Label _polishNote = Note("");
         private readonly FlowLayoutPanel _modelRow, _speechRow, _progressRow;
@@ -46,6 +48,9 @@ namespace Rapcha.Win
         internal CheckBox PolishToggle => _polish;
         internal bool Downloading => _cts != null;
         internal int DownloadClicks { get; private set; }
+        internal PillButton AnywayButton => _anyway;
+        internal int AnywayClicks { get; private set; }
+        internal int Warnings { get; private set; }
         internal int ProgressEvents;
         internal string LastSpeechUri { get; private set; } = "";
         /// <summary>Self-test: don't really open Windows Settings.</summary>
@@ -85,9 +90,21 @@ namespace Rapcha.Win
             _progress.Margin = new Padding(0, 8, 10, 0);
             Card.Controls.Add(_progressRow);
             Card.Controls.Add(_whisperNote);
+            _anywayRow = Row(_anyway);
+            _anywayRow.Margin = new Padding(0, 0, 0, 6);
+            Card.Controls.Add(_anywayRow);
+            _anyway.Click += (s, e) => DownloadAnyway();
             _download.Click += (s, e) => StartDownload();
             _cancel.Click += (s, e) => _cts?.Cancel();
-            _delete.Click += (s, e) => { var m = Current(); if (m != null && _cts == null) { ModelStore.Delete(m); Refresh(); } };
+            _delete.Click += (s, e) =>
+            {
+                var m = Current();
+                if (m == null || _cts != null) return;
+                ModelStore.Delete(m);
+                AppStorage.Log("Settings: Whisper model deleted (" + m.Id + "); offline voice typing uses built-in Windows speech from now on");
+                Refresh();
+                if (!ModelStore.IsInstalled(m)) _whisperNote.Text = "Deleted. Offline voice typing uses built-in Windows speech from now on.";
+            };
 
             _polish.Font = new Font(Theme.Sans, 10f);
             _polish.BackColor = Color.White;
@@ -138,24 +155,31 @@ namespace Rapcha.Win
                 _speechRow.Visible = !speech;
                 _speechHelp.Visible = !speech;
 
-                var allowed = WhisperModels.ForTier(tier);
+                var allowed = WhisperModels.Usable(tier);
                 var chosen = WhisperModels.Choose(tier, OfflineSettings.ChosenModel);
                 _model.Items.Clear();
-                foreach (var m in (allowed.Count > 0 ? allowed : new[] { WhisperModels.Tiny })) _model.Items.Add(new ModelItem { Model = m });
+                foreach (var m in allowed) _model.Items.Add(new ModelItem { Model = m });
                 int idx = Enumerable.Range(0, _model.Items.Count).FirstOrDefault(i => ((ModelItem)_model.Items[i]).Model == chosen);
                 if (_model.Items.Count > 0) _model.SelectedIndex = Math.Max(0, idx);
                 bool low = tier == DeviceTier.Low;
                 bool busy = _cts != null;
                 var cur = Current();
-                bool installed = !low && cur != null && ModelStore.IsInstalled(cur);
+                bool installed = cur != null && ModelStore.IsInstalled(cur);
                 _download.Visible = true;                        // always visible…
                 _download.Enabled = !low && !busy && !installed;  // …greyed out on a Low laptop (a click does nothing)
+                _anywayRow.Visible = low && !busy && !installed;  // v17: …but a Low laptop may download the lightest model anyway, after a warning
                 _download.Text = installed ? "Whisper model downloaded" : "Download Whisper model";
                 _model.Enabled = !low && !busy && allowed.Count > 1;
                 _delete.Visible = installed && !busy;
                 _progressRow.Visible = busy;
-                if (low)
-                    _whisperNote.Text = "Your laptop's memory is too low for this. Rapcha will use built-in Windows speech instead.";
+                if (low && installed)
+                    _whisperNote.Text = WhisperNative.SimulateBlocked || WhisperNative.Status == WhisperNative.State.Blocked ? WhisperNative.BlockedMessage :
+                        "Whisper Tiny is downloaded, so Rapcha uses it when you're offline (up to 2 minutes at a time). Your laptop's memory is low: " +
+                        "if it gets slow or hot, press Delete model and Rapcha goes straight back to built-in Windows speech.";
+                else if (low && busy)
+                    _whisperNote.Text = "Your laptop's memory is too low for this, but you chose to try it. Downloading Whisper Tiny from the official whisper.cpp models on Hugging Face…";
+                else if (low)
+                    _whisperNote.Text = "Your laptop's memory is too low for this. Rapcha will use built-in Windows speech instead. You can still try the lightest Whisper model at your own risk.";
                 else if (busy)
                     _whisperNote.Text = "Downloading from the official whisper.cpp models on Hugging Face…";
                 else if (installed)
@@ -163,6 +187,7 @@ namespace Rapcha.Win
                 else
                     _whisperNote.Text = cur.Label + " from the official whisper.cpp models on Hugging Face. Checked after download, kept in %AppData%\\Rapcha\\models. It loads only while you talk.";
                 _whisperNote.ForeColor = low ? Color.FromArgb(150, 90, 40) : Theme.Muted;
+                _delete.Text = "Delete model";
 
                 _polish.Visible = _polishNote.Visible = tier == DeviceTier.Strong;
                 _polish.Checked = false;
@@ -181,11 +206,24 @@ namespace Rapcha.Win
             return "Ready: " + m.Label + ". Used when you're offline; it loads only while you talk and is freed right after.";
         }
 
-        private async void StartDownload()
+        /// <summary>Low laptop: warn (hot, slow, memory, battery), then download Whisper Tiny only if the user says so.</summary>
+        private void DownloadAnyway()
         {
-            DownloadClicks++;
-            var m = Current();
-            if (m == null || DeviceProbe.Tier == DeviceTier.Low || _cts != null) return;
+            AnywayClicks++;
+            if (_cts != null || DeviceProbe.Tier != DeviceTier.Low) return;
+            Warnings++;
+            bool yes = LowMemoryWarning.Confirm(Card.FindForm(), DeviceProbe.Facts);
+            AppStorage.Log("Settings: Low laptop, download lightest Whisper anyway: " + (yes ? "confirmed" : "cancelled"));
+            if (!yes) return;
+            OfflineSettings.ChosenModel = WhisperModels.Lightest.Id;
+            StartDownload(true);
+        }
+
+        private async void StartDownload(bool anyway = false)
+        {
+            if (!anyway) DownloadClicks++;
+            var m = anyway ? WhisperModels.Lightest : Current();
+            if (m == null || (DeviceProbe.Tier == DeviceTier.Low && !anyway) || _cts != null) return;
             _cts = new CancellationTokenSource();
             _progress.Value = 0;
             Refresh();

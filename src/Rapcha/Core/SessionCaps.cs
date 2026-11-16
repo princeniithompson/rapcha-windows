@@ -12,13 +12,15 @@ namespace Rapcha.Core
     /// connection lasts "around 10 minutes" (https://ai.google.dev/gemini-api/docs/live-session). Rapcha keeps one
     /// connection per dictation and still needs it for the polished text after you stop, so it stops listening at
     /// 9:30 and leaves room to finish inside the 10 minutes. Offline: built-in Windows speech 5 min; Whisper 2 min
-    /// on a Medium laptop, 5 min on a Strong one.
+    /// on a Low (downloaded anyway) or Medium laptop, 5 min on a Strong one.
     /// </summary>
     public static class SessionCaps
     {
         public const int GeminiSeconds = 9 * 60 + 30;
         public const int BuiltInSeconds = 5 * 60;
         public const int WhisperMediumSeconds = 2 * 60;
+        /// <summary>v17: a Low laptop running Whisper Tiny anyway: 2 minutes, plus the free-memory guard.</summary>
+        public const int WhisperLowSeconds = 2 * 60;
         public const int WhisperStrongSeconds = 5 * 60;
         public const int CountdownSeconds = 20;
         /// <summary>Offline engines stop (keeping the words) when free memory falls below this.</summary>
@@ -33,7 +35,7 @@ namespace Rapcha.Core
             {
                 case SpeechEngine.Gemini: return GeminiSeconds;
                 case SpeechEngine.BuiltIn: return BuiltInSeconds;
-                default: return tier == DeviceTier.Strong ? WhisperStrongSeconds : WhisperMediumSeconds;
+                default: return tier == DeviceTier.Strong ? WhisperStrongSeconds : tier == DeviceTier.Low ? WhisperLowSeconds : WhisperMediumSeconds;
             }
         }
 

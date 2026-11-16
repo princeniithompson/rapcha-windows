@@ -55,7 +55,7 @@ When there is no internet, or it drops while you talk, Rapcha keeps typing with 
 
 At startup Rapcha checks the laptop's memory (also cores and free disk) and picks a level:
 
-- **Low** (under 6 GB): built-in Windows speech, up to 5 minutes at a time. *Download Whisper model* is shown but greyed out: "Your laptop's memory is too low for this. Rapcha will use built-in Windows speech instead."
+- **Low** (under 6 GB): built-in Windows speech, up to 5 minutes at a time. *Download Whisper model* is shown but greyed out: "Your laptop's memory is too low for this. Rapcha will use built-in Windows speech instead." Below it, **Download lightest model anyway** lets you try Whisper Tiny after a warning that the laptop may get hot, slow down, and use a lot of memory and battery. With Tiny downloaded, offline voice typing uses Whisper (up to 2 minutes at a time, stopping early and keeping your words if free memory runs low); online still uses Gemini. **Delete model** takes it away again, and Rapcha goes straight back to built-in Windows speech.
 - **Medium** (6 to 8 GB): you can download Whisper Tiny (74 MB), up to 2 minutes at a time.
 - **Strong** (over 8 GB): Whisper Base (141 MB), or Small (465 MB) for the best accuracy, up to 5 minutes at a time.
 
@@ -65,7 +65,19 @@ Whisper models come from the official whisper.cpp models on Hugging Face (`ggerg
 
 Offline, your words get a light clean-up without any model: capitals at the start of sentences, a full stop at the end, "um" and "uh" removed, and your Custom Vocabulary spelled your way. Online, Gemini's smart polish is unchanged. (An optional small polishing model for Strong laptops is planned; it is shown as "coming later".)
 
-**Recording timer.** A small m:ss timer sits in the words box's bottom row, between Cancel and the keyboard icon, in a light shade of your glow colour. In the last 20 seconds it gently counts down ("0:19 left") and then Rapcha stops by itself and keeps the text. Limits: online 9:30 (Google's Live API keeps one connection for about 10 minutes, and Rapcha needs a few seconds after you stop to finish the text: https://ai.google.dev/gemini-api/docs/live-session), built-in speech 5:00, Whisper 2:00 (Medium) or 5:00 (Strong).
+**Recording timer.** A small m:ss timer sits in the words box's bottom row, between Cancel and the keyboard icon, in a light shade of your glow colour. In the last 20 seconds it gently counts down ("0:19 left") and then Rapcha stops by itself and keeps the text. Limits: online 9:30 (Google's Live API keeps one connection for about 10 minutes, and Rapcha needs a few seconds after you stop to finish the text: https://ai.google.dev/gemini-api/docs/live-session), built-in speech 5:00, Whisper 2:00 (Low, downloaded anyway, or Medium) or 5:00 (Strong).
+
+## Snooze
+
+Drag the ring to the middle of the screen and hold it still for about 5 seconds. A round **Snooze** circle appears in the middle; drop the ring on it and Rapcha hides for 19 minutes (change it in **Settings → Snooze**: 19 minutes, 1 hour, 2 hours, or any number of minutes). It comes back by itself, in the same spot. Quick drags across the screen never show the circle, and dropping the ring anywhere else docks it at the edge as usual.
+
+To wake it early: right-click the Rapcha tray icon and choose **Wake Rapcha now** (it shows the time left), or press **Wake Rapcha now** on the Home page. Your shortcuts keep working while snoozed: pressing a voice-typing or select-to-speak shortcut wakes Rapcha and starts as usual. Opening Rapcha again (from the Start menu or the exe) also wakes it. The end time is saved, so a restart during a snooze stays snoozed until the time is up.
+
+## Start menu and Windows Search
+
+Rapcha can type into the Start menu / Windows Search box: it now recognises Start and Search (StartMenuExperienceHost, SearchHost; SearchApp / SearchUI on Windows 10) as a text field, and types your words there as one line (Enter in that box would open the top result). Use your voice-typing shortcut there: Rapcha's ring and words box never take focus, so Start stays open while you talk. When Start or Search opens over the ring, Rapcha moves the ring (and the words box) beside it, and while you talk with Start open the tray icon shows a red listening dot.
+
+What Windows doesn't allow: the Start menu, Search, Action Center and the taskbar's flyouts are drawn in their own Windows "bands" above every normal always-on-top window. Only signed accessibility apps with UIAccess, installed in Program Files, may draw above them, so Rapcha's bubble and its yellow field outline can't appear on top of Start. Sources: Microsoft, "Security Considerations for Assistive Technologies" (https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview), Microsoft, "Only elevate UIAccess applications that are installed in secure locations" (https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/user-account-control-only-elevate-uiaccess-applications-that-are-installed-in-secure-locations), and ADeltaX, "Window z-order in Windows 10" (https://blog.adeltax.com/window-z-order-in-windows-10/).
 
 ## For developers
 

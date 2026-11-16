@@ -48,6 +48,8 @@ namespace Rapcha.Win
         internal IReadAloud LastPreview => _preview;
         private readonly OfflineCard _offlineCard = new OfflineCard();
         internal OfflineCard Offline => _offlineCard;
+        private readonly SnoozeCard _snoozeCard = new SnoozeCard();
+        internal SnoozeCard SnoozeSettings => _snoozeCard;
         private readonly GlowPicker _glow = new GlowPicker();
         private readonly ShortcutsRows _shortcuts = new ShortcutsRows();
         internal ShortcutsRows Shortcuts => _shortcuts;
@@ -166,6 +168,7 @@ namespace Rapcha.Win
             _layout.Controls.Add(Card("Shortcuts",
                 Help("Start voice typing or select to speak from the keyboard, in any app."),
                 _shortcuts));
+            _layout.Controls.Add(_snoozeCard.Card);
             _layout.Controls.Add(Card("Select to speak",
                 Help("Double-click the ring, then drag a box around any text on the screen (or tap a word) to hear it. Esc closes."),
                 _editRow, _voiceRow, _voiceHint, speedRow, _badges, _badgesHint));

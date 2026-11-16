@@ -24,7 +24,7 @@ namespace Rapcha.Core
         public static readonly WhisperModel Tiny = new WhisperModel
         {
             Id = "tiny.en", File = "ggml-tiny.en.bin", Bytes = 77704715,
-            Sha256 = "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f", Label = "Tiny (English), 74 MB", RamMb = 300,
+            Sha256 = "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f", Label = "Tiny (English), 74 MB", RamMb = 400,
         };
         public static readonly WhisperModel Base = new WhisperModel
         {
@@ -54,10 +54,20 @@ namespace Rapcha.Core
 
         public static WhisperModel Recommended(DeviceTier tier) => ForTier(tier).FirstOrDefault();
 
-        /// <summary>The model to use: the chosen one when this tier allows it, else the tier's recommendation.</summary>
-        public static WhisperModel Choose(DeviceTier tier, string chosenId)
+        /// <summary>The lightest model: the one a Low laptop may still download "anyway" (v17), after a warning.</summary>
+        public static WhisperModel Lightest => Tiny;
+
+        /// <summary>Models this tier may download and use: its recommended ones, or on a Low laptop only the lightest (at the user's own risk).</summary>
+        public static IList<WhisperModel> Usable(DeviceTier tier)
         {
             var allowed = ForTier(tier);
+            return allowed.Count > 0 ? allowed : new[] { Lightest };
+        }
+
+        /// <summary>The model to use: the chosen one when this tier allows it, else the tier's recommendation (Low: the lightest).</summary>
+        public static WhisperModel Choose(DeviceTier tier, string chosenId)
+        {
+            var allowed = Usable(tier);
             return allowed.FirstOrDefault(m => m.Id == chosenId) ?? allowed.FirstOrDefault();
         }
 

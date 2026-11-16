@@ -28,7 +28,8 @@ namespace Rapcha.Win
             if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return false;
             Native.GetWindowThreadProcessId(hwnd, out var pid);
             if (pid == Native.GetCurrentProcessId()) return false;
-            var cls = ClassOf(Native.GetAncestor(hwnd, Native.GA_ROOT));
+            var root = Native.GetAncestor(hwnd, Native.GA_ROOT);
+            var cls = ClassOf(root);
             switch (cls)
             {
                 case "Progman":
@@ -36,11 +37,17 @@ namespace Rapcha.Win
                 case "Shell_TrayWnd":
                 case "Shell_SecondaryTrayWnd":
                 case "NotifyIconOverflowWindow":
-                case "Windows.UI.Core.CoreWindow": // Start menu / search flyouts
                     return false;
+                case "Windows.UI.Core.CoreWindow":
+                    // v17: the Start menu and Windows Search are real targets (their search box); other shell
+                    // flyouts (Action Center, the clock / calendar, ...) still are not.
+                    return ShellWindows.SurfaceOf(root) == Rapcha.Core.ShellSurface.StartSearch;
             }
             return true;
         }
+
+        /// <summary>Is this target the Start menu / Windows Search?</summary>
+        public static bool IsStartSearch(IntPtr hwnd) => hwnd != IntPtr.Zero && ShellWindows.SurfaceOf(hwnd) == Rapcha.Core.ShellSurface.StartSearch;
 
         /// <summary>Must be called on the UI (STA) thread.</summary>
         public static Result Deliver(string text, IntPtr target)
@@ -58,6 +65,7 @@ namespace Rapcha.Win
             Thread.Sleep(60); // let clipboard viewers / the target see the new data before pasting
             if (!IsUsableTarget(target)) { why.Append(" no_target"); return Result.Copied; }
             why.Append(" target=" + ClassOf(Native.GetAncestor(target, Native.GA_ROOT)));
+            if (IsStartSearch(target)) return DeliverToStartSearch(text, target, why);
 
             bool front = BringToFront(target, why);
             uint thread = Native.GetWindowThreadProcessId(target, out _);
@@ -89,6 +97,79 @@ namespace Rapcha.Win
             why.Append(" pasted");
             return Result.Typed;
         }
+
+        /// <summary>
+        /// The Start menu / Windows Search box (v17). Rapcha's ring and words box never take focus, so Start stays
+        /// open while you talk; the words go in as one line (Enter there would open the top result). Never tries
+        /// to bring a closed Start back (that would do nothing useful); then the words stay on the clipboard.
+        /// Order: Ctrl+V (checked through UI Automation), then typing the characters (SendInput Unicode), then
+        /// UI Automation SetValue into an empty box. Only lengths are compared and logged, never the words.
+        /// </summary>
+        private static Result DeliverToStartSearch(string text, IntPtr target, StringBuilder why)
+        {
+            why.Append(" start_search=" + Rapcha.Core.ShellTargets.ExeName(ShellWindows.ExeOf(target)));
+            var root = Native.GetAncestor(target, Native.GA_ROOT);
+            if (!IsForeground(root) || ShellWindows.IsCloaked(root)) { why.Append(" start_closed"); return Result.Copied; }
+            string line = Rapcha.Core.ShellTargets.OneLine(text);
+            if (line != text) SetClipboard(line, why);
+            ReleaseModifiers(why);
+            int before = Uia.FocusedTextLength(root, 600, why);
+            if (!SendChord(0x1D, 0x2F)) { why.Append(" sendinput_blocked"); return Result.Copied; }
+            int after = WaitLength(root, before, 700, why);
+            why.Append(" len_before=" + before + " len_after=" + after);
+            if (before < 0 || after < 0) { why.Append(" pasted_unchecked"); return Result.Typed; }   // UIA can't read it: trust the paste
+            if (after != before) { why.Append(" pasted"); return Result.Typed; }   // changed: the paste landed (it may have replaced a selection)
+            if (!IsForeground(root)) { why.Append(" start_closed_during_paste"); return Result.Copied; }
+
+            // The paste didn't land: type the characters.
+            if (TypeUnicode(line)) { after = WaitLength(root, before, 900, why); why.Append(" typed_len=" + after); if (after != before) { why.Append(" typed"); return Result.Typed; } }
+            else why.Append(" type_blocked");
+            if (before == 0)
+            {
+                try { if (Uia.SetFocusedValueIfEmptyAsync(root, line, 1000, why).GetAwaiter().GetResult()) return Result.Typed; }
+                catch (Exception e) { why.Append(" uia_error=" + e.GetType().Name); }
+            }
+            return Result.Copied;
+        }
+
+        private static int WaitLength(IntPtr root, int before, int ms, StringBuilder why)
+        {
+            int len = -1;
+            for (int waited = 0; waited <= ms; waited += 100)
+            {
+                Thread.Sleep(100);
+                len = Uia.FocusedTextLength(root, 400, why);
+                if (len < 0 || len != before) return len;
+            }
+            return len;
+        }
+
+        /// <summary>Types the text as Unicode characters (no keyboard layout involved). Line breaks are never sent.</summary>
+        public static bool TypeUnicode(string text)
+        {
+            var list = new System.Collections.Generic.List<Native.INPUT>(text.Length * 2);
+            foreach (var c in text)
+            {
+                if (c == '\r' || c == '\n') continue;
+                list.Add(UnicodeInput(c, false));
+                list.Add(UnicodeInput(c, true));
+            }
+            if (list.Count == 0) return true;
+            uint sent = 0;
+            for (int i = 0; i < list.Count; i += 64)
+            {
+                var part = list.GetRange(i, Math.Min(64, list.Count - i)).ToArray();
+                sent += Native.SendInput((uint)part.Length, part, Marshal.SizeOf(typeof(Native.INPUT)));
+                Thread.Sleep(5);
+            }
+            return sent == list.Count;
+        }
+
+        private static Native.INPUT UnicodeInput(char c, bool up) => new Native.INPUT
+        {
+            type = Native.INPUT_KEYBOARD,
+            u = new Native.InputUnion { ki = new Native.KEYBDINPUT { wVk = 0, wScan = c, dwFlags = 0x0004 /* KEYEVENTF_UNICODE */ | (up ? Native.KEYEVENTF_KEYUP : 0) } }
+        };
 
         /// <summary>Makes the target the foreground window; true when it is (or already was).</summary>
         public static bool BringToFront(IntPtr hwnd, StringBuilder why)

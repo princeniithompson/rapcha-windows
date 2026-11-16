@@ -58,19 +58,32 @@ namespace Rapcha.Win
         private Point _bubbleOffset;
         private bool _bubbleFollows;
 
+        // Snooze (v17) and the Start menu / Windows Search (v17).
+        private readonly ToolStripMenuItem _wakeItem = new ToolStripMenuItem("Wake Rapcha now") { Visible = false };
+        private readonly ToolStripSeparator _wakeSep = new ToolStripSeparator { Visible = false };
+        private readonly Timer _snoozeTimer = new Timer { Interval = 1000 };
+        private bool _startInFront;
+        private bool _movedAside;
+        private Icon _listeningIcon;
+        private const string TrayIdle = "Rapcha - click the ring to talk";
+
         /// <param name="showMain">A manual launch (double-click, shortcut): show the main window. Autostart stays quiet.</param>
-        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false)
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null)
         {
             _selfTestOcr = selfTestOcr;
             _selfTestRing = selfTestRing;
             var open = new ToolStripMenuItem("Open Rapcha", null, (s, e) => OpenMain(MainWindow.Page.Home, null)) { Font = new Font(_menu.Font, FontStyle.Bold) };
+            _wakeItem.Click += (s, e) => Snooze.Wake("tray: Wake Rapcha now");
+            _menu.Items.Add(_wakeItem);
+            _menu.Items.Add(_wakeSep);
             _menu.Items.Add(open);
+            _menu.Opening += (s, e) => UpdateSnoozeUi();
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
             _tray.Icon = Program.SmallIcon;
-            _tray.Text = "Rapcha - click the ring to talk";
+            _tray.Text = TrayIdle;
             _tray.ContextMenuStrip = _menu;
             _tray.Visible = true;
             _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) OpenMain(MainWindow.Page.Home, null); };
@@ -116,6 +129,11 @@ namespace Rapcha.Win
             _bubble.Dragged += (dx, dy) => _ring.MoveRingTo(_ring.RingBounds.X + dx, _ring.RingBounds.Y + dy);
             _bubble.DragEnded += () => _ring.DockNow();
             _ring.RestAllowed = () => _phase == Phase.Idle && _overlay == null && !_bubble.Visible && !_ring.IsDragging;
+            // Hold-to-snooze: only while nothing is going on (not while voice typing or reading aloud).
+            _ring.SnoozeAllowed = () => _phase == Phase.Idle && _overlay == null && !_bubble.Visible;
+            _ring.SnoozeDropped += () => Snooze.Start(Snooze.Minutes, "dropped on the Snooze circle");
+            Snooze.Changed += ApplySnooze;
+            _snoozeTimer.Tick += (s, e) => OnSnoozeTick();
             _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
             _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
             _bubble.FixMicClicked += SettingsPage.OpenMicrophoneSettings;
@@ -123,9 +141,13 @@ namespace Rapcha.Win
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
+            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
+            else if (Snooze.Active) { AppStorage.Log("Snooze: still on after a restart (" + Snooze.LeftText + ")"); ApplySnooze(); }
+            ShellWindows.Hook();
+            ShellWindows.ForegroundChanged += OnForegroundChanged;
             InstanceManager.Listen(
                 onQuit: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Quit requested by a newer Rapcha"); ExitApp(); })); } catch { } },
-                onShow: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Show requested by a second launch: opening the main window"); _ring.ShowDocked(); OpenForLaunch(); })); } catch { } });
+                onShow: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Show requested by a second launch: opening the main window"); Snooze.Wake("Rapcha was opened again"); _ring.ShowDocked(); OpenForLaunch(); })); } catch { } });
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
@@ -148,6 +170,7 @@ namespace Rapcha.Win
             prime.Start();
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (_selfTestRing) { RunRingSelfTest(); return; }
+            if (selfTestV17 != null) { new V17SelfTest(this, selfTestV17).Start(); return; }
             if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
         }
 
@@ -175,6 +198,8 @@ namespace Rapcha.Win
 
         private void OnShortcut(ShortcutAction a, bool down)
         {
+            // While snoozed the shortcuts still work: using one ends the snooze (the ring comes back) and does its job.
+            if (down && Snooze.Active) Snooze.Wake("shortcut " + a);
             switch (a)
             {
                 case ShortcutAction.TapToTalk:
@@ -337,6 +362,7 @@ namespace Rapcha.Win
             _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
             _bubble.Offline = offline != null;
             _bubble.SetTimer(TimerText.For(0, _maxSeconds));
+            if (ShellWindows.StartOrSearchInFront(out var flyout)) { AppStorage.Log("[s" + number + "] started over Start / Search"); SetStartInFront(true, flyout); }
             _field.Start(_target);           // follows focus every 300 ms (and on UIA focus events) until the words are in
             _bubble.FieldValid = null;
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
@@ -445,6 +471,7 @@ namespace Rapcha.Win
                 _bubble.MicHint = cantHear;
             }
             _bubble.SetTimer(TimerText.For(elapsed.TotalSeconds, _maxSeconds));
+            CheckStartMenu(false);   // backup for a missed foreground event
             long free = -1;
             if (_offline != null && (DateTime.UtcNow - _lastMemCheck).TotalMilliseconds >= 1000)
             {
@@ -619,6 +646,172 @@ namespace Rapcha.Win
             _router = null;
             _ring.State = RingState.Idle;
             _main?.Settings.ResumeMeter();
+            UpdateTrayForStart();
+        }
+
+        // ---------------- Snooze (v17) ----------------
+
+        /// <summary>Snoozed: the ring (and anything beside it) hides; woken: it comes back where it was docked.</summary>
+        private void ApplySnooze()
+        {
+            if (Snooze.Active)
+            {
+                _label.HideNow();
+                _ring.Hide();
+                _snoozeTimer.Start();
+            }
+            else
+            {
+                _snoozeTimer.Stop();
+                if (!_ring.Visible) _ring.ShowDocked();
+                _ring.Wake();
+            }
+            UpdateSnoozeUi();
+        }
+
+        private void OnSnoozeTick()
+        {
+            if (Snooze.Due) { Snooze.Wake("time is up"); return; }
+            if (!Snooze.Active) { _snoozeTimer.Stop(); UpdateSnoozeUi(); return; }
+            UpdateSnoozeUi();
+        }
+
+        private void UpdateSnoozeUi()
+        {
+            bool on = Snooze.Active;
+            _wakeItem.Visible = _wakeSep.Visible = on;
+            _wakeItem.Text = on ? "Wake Rapcha now (" + Snooze.LeftText + ")" : "Wake Rapcha now";
+            if (on) SetTrayText("Rapcha is snoozed - " + Snooze.LeftText);
+            else if (!(_phase == Phase.Recording && _startInFront)) SetTrayText(TrayIdle);
+        }
+
+        private void SetTrayText(string t)
+        {
+            if (t.Length > 63) t = t.Substring(0, 63);   // NotifyIcon.Text limit
+            if (_tray.Text != t) _tray.Text = t;
+        }
+
+        internal ContextMenuStrip TrayMenu => _menu;
+        internal ToolStripMenuItem WakeItem => _wakeItem;
+        internal bool StartInFront => _startInFront;
+        internal bool MovedAside => _movedAside;
+        internal bool IsRecording => _phase != Phase.Idle;
+        internal MainWindow Main => _main;
+        internal void SimulateShortcut(ShortcutAction a, bool down) => OnShortcut(a, down);
+        internal void CancelForTest() => Cancel(null);
+        internal void ExitForTest() => ExitApp();
+        internal string TrayText => _tray.Text;
+        internal RingWindow Ring => _ring;
+        internal bool TrayListening => _tray.Icon == _listeningIcon && _listeningIcon != null;
+
+        // ---------------- Start menu / Windows Search (v17) ----------------
+
+        private void OnForegroundChanged(IntPtr hwnd)
+        {
+            // A new foreground window: put Rapcha's windows back on top of normal always-on-top windows. (Start and
+            // Search are in a higher Windows band; nothing a normal app does can put a window over them.)
+            _ring.KeepOnTop();
+            if (_bubble.Visible) _bubble.KeepOnTop();
+            if (_label.Visible) _label.KeepOnTop();
+            CheckStartMenu(true);
+            if (_phase == Phase.Recording && _field.Tracking) _ = _field.CheckNowAsync();   // e.g. focus went into the Start search box
+        }
+
+        private void CheckStartMenu(bool fromEvent)
+        {
+            bool now = ShellWindows.StartOrSearchInFront(out var root);
+            if (now != _startInFront) SetStartInFront(now, root);
+        }
+
+        private void SetStartInFront(bool open, IntPtr root)
+        {
+            _startInFront = open;
+            if (open)
+            {
+                var r = ShellWindows.BoundsOf(root);
+                AppStorage.Log("Start / Search in front: " + ShellTargets.ExeName(ShellWindows.ExeOf(root)) + " " + r.Width + "x" + r.Height + " phase=" + _phase);
+                AvoidFlyout(r);
+            }
+            else
+            {
+                AppStorage.Log("Start / Search closed");
+                if (_movedAside) { _movedAside = false; _ring.RestoreSavedDock(); if (_bubble.Visible) _bubble.PlaceBeside(_ring.RingBounds, _ring.Edge); }
+            }
+            UpdateTrayForStart();
+        }
+
+        /// <summary>
+        /// Start or Search covers the ring or the words box: move them along the edge (or to another edge) so they
+        /// stay visible beside it. Not saved; they go back when Start closes. Skipped when Start covers nearly all
+        /// of the screen (nowhere to go) or while the ring is being dragged or snoozed.
+        /// </summary>
+        private void AvoidFlyout(Rectangle fly)
+        {
+            if (fly.IsEmpty || _ring.IsDragging || !_ring.Visible) return;
+            var wa = Screen.FromRectangle(_ring.RingBounds).WorkingArea;
+            var work = new IntRect(wa.X, wa.Y, wa.Width, wa.Height);
+            Rectangle Used() => _bubble.Visible ? Rectangle.Union(_ring.RingBounds, _bubble.Area) : _ring.RingBounds;
+            if (!Used().IntersectsWith(fly)) return;
+            if (!ShellTargets.CanAvoid(work, new IntRect(fly.X, fly.Y, fly.Width, fly.Height))) { AppStorage.Log("Start / Search covers the screen: can't move out from under it"); return; }
+            var start = _ring.DockSpot;
+            var edges = new[] { start.Edge, Opposite(start.Edge), DockEdge.Left, DockEdge.Right, DockEdge.Top, DockEdge.Bottom }.Distinct();
+            var fractions = new[] { start.Fraction, 0.15, 0.85, 0.5, 0.3, 0.7, 0.05, 0.95 };
+            foreach (var edge in edges)
+                foreach (var f in fractions)
+                {
+                    _ring.PlaceTemporarily(new DockPosition(edge, f));
+                    if (_bubble.Visible) _bubble.PlaceBeside(_ring.RingBounds, _ring.Edge);
+                    if (!Used().IntersectsWith(fly))
+                    {
+                        _movedAside = true;
+                        AppStorage.Log("Start / Search: moved the ring" + (_bubble.Visible ? " and words box" : "") + " beside it (" + edge + " " + f.ToString("0.00") + ")");
+                        return;
+                    }
+                }
+            _ring.RestoreSavedDock();
+            if (_bubble.Visible) _bubble.PlaceBeside(_ring.RingBounds, _ring.Edge);
+            AppStorage.Log("Start / Search: no free spot beside it");
+        }
+
+        private static DockEdge Opposite(DockEdge e) => e == DockEdge.Left ? DockEdge.Right : e == DockEdge.Right ? DockEdge.Left : e == DockEdge.Top ? DockEdge.Bottom : DockEdge.Top;
+
+        /// <summary>While voice typing with Start / Search in front, the tray icon shows a listening dot (the taskbar stays visible).</summary>
+        private void UpdateTrayForStart()
+        {
+            bool listening = _phase == Phase.Recording && _startInFront;
+            if (listening)
+            {
+                if (_listeningIcon == null) _listeningIcon = MakeListeningIcon();
+                if (_listeningIcon != null && _tray.Icon != _listeningIcon) _tray.Icon = _listeningIcon;
+                SetTrayText("Rapcha is listening - press your shortcut again to finish");
+            }
+            else
+            {
+                if (_tray.Icon != Program.SmallIcon) _tray.Icon = Program.SmallIcon;
+                UpdateSnoozeUi();
+            }
+        }
+
+        private static Icon MakeListeningIcon()
+        {
+            try
+            {
+                int size = SystemInformation.SmallIconSize.Width;
+                using (var bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.Clear(Color.Transparent);
+                        if (Program.SmallIcon != null) g.DrawIcon(Program.SmallIcon, new Rectangle(0, 0, size, size));
+                        float d = size * 0.5f;
+                        using (var white = new SolidBrush(Color.White)) g.FillEllipse(white, size - d - 0.5f, size - d - 0.5f, d + 0.5f, d + 0.5f);
+                        using (var dot = new SolidBrush(Color.FromArgb(220, 40, 40))) g.FillEllipse(dot, size - d + 1, size - d + 1, d - 2, d - 2);
+                    }
+                    return Icon.FromHandle(bmp.GetHicon());
+                }
+            }
+            catch { return null; }
         }
 
         private void ShowLabel(string text, int hideAfterMs, bool warning = false)
@@ -1225,6 +1418,8 @@ namespace Rapcha.Win
             _shortcuts.Dispose();
             _typing.Dispose();
             Cancel(null);
+            ShellWindows.Unhook();
+            _snoozeTimer.Dispose();
             _tray.Visible = false;
             _tray.Dispose();
             _hotkeys.Dispose();

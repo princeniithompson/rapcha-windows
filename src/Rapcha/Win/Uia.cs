@@ -143,6 +143,49 @@ namespace Rapcha.Win
         }
 
         /// <summary>
+        /// Length of the text in the focused field, when it belongs to <paramref name="root"/>'s process (the Start /
+        /// Search box). -1 when UI Automation can't tell. Only the length is used; the text is never logged.
+        /// </summary>
+        public static int FocusedTextLength(IntPtr root, int timeoutMs, StringBuilder why)
+        {
+            var sub = new StringBuilder();
+            var r = RunMta(() =>
+            {
+                var el = FocusedIn(root);
+                if (el == null) return -1;
+                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out var vp)) return (((ValuePattern)vp).Current.Value ?? "").Length;
+                if (el.TryGetCurrentPattern(TextPattern.Pattern, out var tp)) return (((TextPattern)tp).DocumentRange.GetText(4096) ?? "").Length;
+                return -1;
+            }, timeoutMs, sub, "uia_len").GetAwaiter().GetResult();
+            return r == 0 && sub.Length > 0 ? -1 : r;
+        }
+
+        /// <summary>The element with keyboard focus, if it's in the same process as the window (else null).</summary>
+        private static AutomationElement FocusedIn(IntPtr root)
+        {
+            var el = AutomationElement.FocusedElement;
+            if (el == null) return null;
+            Native.GetWindowThreadProcessId(root, out var pid);
+            return el.Current.ProcessId == (int)pid ? el : null;
+        }
+
+        /// <summary>Start / Search fallback: SetValue on the focused (XAML) box when it is empty and writable.</summary>
+        public static Task<bool> SetFocusedValueIfEmptyAsync(IntPtr root, string text, int timeoutMs, StringBuilder why)
+        {
+            return RunMta(() =>
+            {
+                var el = FocusedIn(root);
+                if (el == null || !el.TryGetCurrentPattern(ValuePattern.Pattern, out var p)) { why.Append(" uia_no_valuepattern"); return false; }
+                var vp = (ValuePattern)p;
+                if (vp.Current.IsReadOnly) { why.Append(" uia_readonly"); return false; }
+                if (!string.IsNullOrEmpty(vp.Current.Value)) { why.Append(" uia_field_not_empty"); return false; }
+                vp.SetValue(text);
+                why.Append(" uia_setvalue_ok");
+                return true;
+            }, timeoutMs, why, "uia_setvalue");
+        }
+
+        /// <summary>
         /// Fallback insert: only into an EMPTY, writable field (ValuePattern.SetValue replaces the whole value,
         /// so it is never used on a field that already has text).
         /// </summary>

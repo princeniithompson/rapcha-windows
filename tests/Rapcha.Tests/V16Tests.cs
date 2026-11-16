@@ -167,7 +167,8 @@ namespace Rapcha.Tests
         [Fact]
         public void OfflinePicksWhatTheLaptopCanRun()
         {
-            Assert.Equal(SpeechEngine.BuiltIn, EnginePolicy.Choose(Offline(DeviceTier.Low, model: true)).Engine);      // Low never runs Whisper
+            Assert.Equal(SpeechEngine.Whisper, EnginePolicy.Choose(Offline(DeviceTier.Low, model: true)).Engine);      // v17: Low runs Whisper Tiny if downloaded anyway
+            Assert.Equal(SpeechEngine.BuiltIn, EnginePolicy.Choose(Offline(DeviceTier.Low, model: false)).Engine);     // …and built-in speech once it is deleted
             Assert.Equal(SpeechEngine.Whisper, EnginePolicy.Choose(Offline(DeviceTier.Medium, model: true)).Engine);
             Assert.Equal(SpeechEngine.BuiltIn, EnginePolicy.Choose(Offline(DeviceTier.Strong, model: false)).Engine);  // not downloaded
             var blocked = Offline(DeviceTier.Strong, model: true); blocked.WhisperBlocked = true;                       // S mode

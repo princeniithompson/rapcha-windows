@@ -24,6 +24,16 @@ namespace Rapcha.Win
         private readonly Action _onHistory;
         private Page _page = (Page)(-1);
 
+        // v17: "Rapcha is snoozed - 18 min left  [Wake Rapcha now]" on Home while snoozed.
+        private readonly FlowLayoutPanel _snoozeBar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Theme.Chip, Padding = new Padding(30, 10, 20, 10), WrapContents = false, Visible = false };
+        private readonly Label _snoozeText = new Label { AutoSize = true, ForeColor = Theme.Ink, BackColor = Theme.Chip, Margin = new Padding(0, 9, 16, 0), Font = new Font(Theme.Sans, 10.5f, FontStyle.Bold) };
+        private readonly PillButton _wake = new PillButton { Text = "Wake Rapcha now", Primary = true };
+        private readonly Timer _snoozeTick = new Timer { Interval = 1000 };
+        private readonly Action _onSnooze;
+        internal Control SnoozeBar => _snoozeBar;
+        internal Label SnoozeText => _snoozeText;
+        internal PillButton WakeButton => _wake;
+
         public MainWindow(Page page = Page.Home, string message = null)
         {
             Text = WindowTitle;
@@ -45,6 +55,14 @@ namespace Rapcha.Win
             _content.Controls.Add(_home);
             _content.Controls.Add(_vocab);
             _content.Controls.Add(_settings);
+            _wake.BackColor = Theme.Chip;
+            _wake.Click += (s, e) => Snooze.Wake("Home: Wake Rapcha now");
+            _snoozeBar.Controls.Add(_snoozeText);
+            _snoozeBar.Controls.Add(_wake);
+            _content.Controls.Add(_snoozeBar);   // added last: docked first, at the top
+            _snoozeTick.Tick += (s, e) => UpdateSnoozeBar();
+            _onSnooze = () => { try { if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(UpdateSnoozeBar)); else UpdateSnoozeBar(); } catch { } };
+            Snooze.Changed += _onSnooze;
             Controls.Add(_content);
             Controls.Add(_nav);
 
@@ -69,6 +87,16 @@ namespace Rapcha.Win
             if (page == Page.Vocabulary) _vocab.Reload();
             _settings.SetPageShown(page == Page.Settings && Visible);
             _nav.Active = page;
+            UpdateSnoozeBar();
+        }
+
+        private void UpdateSnoozeBar()
+        {
+            if (IsDisposed) return;
+            bool show = Snooze.Active && _page == Page.Home;
+            if (show) _snoozeText.Text = "Rapcha is snoozed - " + Snooze.LeftText + ". It comes back by itself.";
+            if (_snoozeBar.Visible != show) _snoozeBar.Visible = show;
+            _snoozeTick.Enabled = show;
         }
 
         public void ShowMessage(string message)
@@ -107,6 +135,8 @@ namespace Rapcha.Win
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             AppStorage.HistoryChanged -= _onHistory;
+            Snooze.Changed -= _onSnooze;
+            _snoozeTick.Dispose();
             _settings.SetPageShown(false);
             base.OnFormClosed(e);
         }

@@ -45,6 +45,18 @@ namespace Rapcha.Win
         public event Action DragStarted;
         public event Action DragEnded;
 
+        // Hold-to-snooze (v17): held still in the middle of the screen for ~5.5 s while dragging shows the Snooze
+        // circle; dropping the ring on it raises SnoozeDropped (the ring goes back to its dock and the app hides it).
+        private readonly Timer _holdTimer = new Timer { Interval = 100 };
+        private readonly SnoozeCircle _circle = new SnoozeCircle();
+        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+        private SnoozeHold _hold = new SnoozeHold(6);
+        public Func<bool> SnoozeAllowed;
+        public event Action SnoozeShown;
+        public event Action SnoozeDropped;
+        public SnoozeCircle SnoozeTarget => _circle;
+        public bool SnoozeArmed => _hold.Armed;
+
         // Resting: after a while with nothing to do the ring shrinks to 60% and dims, still docked at the edge.
         public const double RestScale = 0.6;
         public const double RestOpacity = 0.45;
@@ -78,6 +90,7 @@ namespace Rapcha.Win
             _anim.Interval = 15;
             _restTimer.Tick += (s, e) => OnRestTimer();
             _topmost.Tick += (s, e) => KeepOnTop();
+            _holdTimer.Tick += (s, e) => CheckHold();
             _clickWait.Tick += (s, e) => { _clickWait.Stop(); Clicked?.Invoke(); };
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         }
@@ -438,6 +451,8 @@ namespace Rapcha.Win
             {
                 _dragging = true;
                 _wakeTap = false;
+                _hold = new SnoozeHold(Scale(SnoozeHold.ToleranceDip));
+                _holdTimer.Start();
                 DragStarted?.Invoke();
             }
             if (_dragging)
@@ -446,6 +461,32 @@ namespace Rapcha.Win
                 _ringY = _downRing.Y + dy;
                 Render();
                 Moved?.Invoke();
+                CheckHold();
+            }
+        }
+
+        /// <summary>While dragging: is the ring held still in the middle (show the circle), or over the shown circle?</summary>
+        private void CheckHold()
+        {
+            if (!_dragging) { _holdTimer.Stop(); return; }
+            int cx = _ringX + RingSize / 2, cy = _ringY + RingSize / 2;
+            if (_circle.Showing)
+            {
+                _circle.SetHover(SnoozeZone.Hit(_circle.Center.X, _circle.Center.Y, _circle.SizePx, cx, cy, RingSize));
+                return;
+            }
+            if (SnoozeAllowed != null && !SnoozeAllowed()) { _hold.Reset(); return; }
+            var wa = Screen.FromPoint(new Point(cx, cy)).WorkingArea;
+            var work = new IntRect(wa.X, wa.Y, wa.Width, wa.Height);
+            if (_hold.Update(SnoozeZone.InMiddle(work, cx, cy), cx, cy, _clock.Elapsed.TotalMilliseconds))
+            {
+                int dpi = Native.DpiAt(cx, cy);
+                int size = (int)Math.Round(SnoozeCircle.SizeDip * dpi / 96.0);
+                SnoozeZone.PlaceCircle(work, cx, cy, RingSize, size, out var x, out var y);
+                _circle.ShowAt(new Point(x, y), dpi);
+                KeepOnTop();   // the ring stays above the circle
+                AppStorage.Log("Snooze: circle shown (held still " + SnoozeHold.HoldMs + " ms in the middle)");
+                SnoozeShown?.Invoke();
             }
         }
 
@@ -455,6 +496,24 @@ namespace Rapcha.Win
             _mouseDown = false;
             if (!_dragging) return false;
             _dragging = false;
+            _holdTimer.Stop();
+            if (_circle.Showing)
+            {
+                int cx = _ringX + RingSize / 2, cy = _ringY + RingSize / 2;
+                bool hit = SnoozeZone.Hit(_circle.Center.X, _circle.Center.Y, _circle.SizePx, cx, cy, RingSize);
+                _circle.HideNow();
+                _hold.Reset();
+                if (hit)
+                {
+                    PlaceFromDock();   // back to where it was docked (not saved: it comes back there after the snooze)
+                    Moved?.Invoke();
+                    DragEnded?.Invoke();
+                    SnoozeDropped?.Invoke();
+                    return true;
+                }
+                AppStorage.Log("Snooze: dropped elsewhere, docking as usual");
+            }
+            _hold.Reset();
             SnapToNearestEdge();
             DragEnded?.Invoke();
             return true;
@@ -488,6 +547,41 @@ namespace Rapcha.Win
 
         public void SimulateRelease() { if (_mouseDown) EndDrag(); }
 
+        /// <summary>Self-test: press on the ring (through the same code as the mouse).</summary>
+        public void SimulatePress() => BeginDrag(new Point(_ringX + RingSize / 2, _ringY + RingSize / 2));
+
+        /// <summary>Self-test: while pressed, move so the ring's centre is at <paramref name="ringCenter"/>.</summary>
+        public void SimulateMoveTo(Point ringCenter)
+        {
+            if (!_mouseDown) SimulatePress();
+            int ox = _downScreen.X - (_downRing.X + RingSize / 2), oy = _downScreen.Y - (_downRing.Y + RingSize / 2);
+            DragTo(new Point(ringCenter.X + ox, ringCenter.Y + oy));
+        }
+
+        /// <summary>Puts the ring at a dock position for now without saving it (moved out from under Start / Search).</summary>
+        public void PlaceTemporarily(DockPosition pos)
+        {
+            if (_dragging) return;
+            var screen = CurrentScreen();
+            var wa = screen.WorkingArea;
+            var work = new IntRect(wa.X, wa.Y, wa.Width, wa.Height);
+            _dock = pos;
+            EdgeSnap.Place(work, _dock, RingSize, Scale(GapDip), out _ringX, out _ringY);
+            Render();
+            Moved?.Invoke();
+        }
+
+        /// <summary>Back to the saved dock position (after <see cref="PlaceTemporarily"/>).</summary>
+        public void RestoreSavedDock()
+        {
+            if (_dragging) return;
+            _dock = AppStorage.LoadRing(out _device);
+            PlaceFromDock();
+            Moved?.Invoke();
+        }
+
+        public DockPosition DockSpot => _dock;
+
         /// <summary>For the self-test hook: behaves like a double-click on the ring.</summary>
         public void SimulateDoubleClick() => DoubleClicked?.Invoke();
 
@@ -514,6 +608,8 @@ namespace Rapcha.Win
                 SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
                 _anim.Dispose();
                 _topmost.Dispose();
+                _holdTimer.Dispose();
+                _circle.Dispose();
                 _restTimer.Dispose();
             }
             base.Dispose(disposing);

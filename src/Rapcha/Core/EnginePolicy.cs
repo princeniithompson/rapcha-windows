@@ -26,8 +26,8 @@ namespace Rapcha.Core
     }
 
     /// <summary>
-    /// Picks the recogniser: Gemini when online; offline (if Offline fallback is on) Whisper when this laptop may run
-    /// it and a model is ready, otherwise built-in Windows speech; nothing when there is no recogniser at all
+    /// Picks the recogniser: Gemini when online; offline (if Offline fallback is on) Whisper when a model is downloaded
+    /// (on a Low laptop only if the user chose "Download lightest model anyway"), it can load here and fits in free memory, otherwise built-in Windows speech; nothing when there is no recogniser at all
     /// (then Rapcha offers "Get Windows speech").
     /// </summary>
     public static class EnginePolicy
@@ -41,7 +41,7 @@ namespace Rapcha.Core
         public static EngineChoice ChooseOffline(EngineInputs i)
         {
             if (!i.OfflineFallback) return new EngineChoice { Ok = false, Why = NoEngineReason.OfflineFallbackOff };
-            if (i.Tier != DeviceTier.Low && i.WhisperModelReady && !i.WhisperBlocked && i.WhisperFitsMemory)
+            if (i.WhisperModelReady && !i.WhisperBlocked && i.WhisperFitsMemory)   // v17: also on a Low laptop, if the user downloaded it anyway
                 return new EngineChoice { Ok = true, Engine = SpeechEngine.Whisper };
             if (i.BuiltInAvailable) return new EngineChoice { Ok = true, Engine = SpeechEngine.BuiltIn };
             return new EngineChoice { Ok = false, Why = NoEngineReason.NoRecognizer };
