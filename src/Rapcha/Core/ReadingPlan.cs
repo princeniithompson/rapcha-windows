@@ -108,6 +108,18 @@ namespace Rapcha.Core
         /// <summary>Back or forward by delta words, kept inside the text.</summary>
         public int Skip(int currentWord, int delta) => Clamp(currentWord + delta, 0, Math.Max(0, Words.Count - 1));
 
+        /// <summary>Exclusive end word of the stretch read in one go from a word: the rest of its phrase.</summary>
+        public int SegmentEnd(int word) => Phrases.Count == 0 ? 0 : Phrases[PhraseOfWord(word)].EndWord;
+
+        /// <summary>Text of words [first, end).</summary>
+        public string TextRange(int first, int end)
+        {
+            if (Words.Count == 0 || end <= first) return "";
+            first = Clamp(first, 0, Words.Count - 1);
+            end = Clamp(end, first + 1, Words.Count);
+            return Text.Substring(Words[first].Start, Words[end - 1].End - Words[first].Start);
+        }
+
         public string WordText(int word) => Text.Substring(Words[word].Start, Words[word].Length);
 
         public string PhraseText(int phrase)

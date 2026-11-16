@@ -31,10 +31,13 @@ namespace Rapcha.Win
             });
         }
 
+        public sealed class Selection { public string Text = ""; public bool HasTextPattern; }
+
         /// <summary>Selected text of the focused element, via TextPattern.GetSelection only.</summary>
-        public static Task<string> SelectedTextAsync(int timeoutMs, StringBuilder why)
+        public static async Task<Selection> SelectedTextAsync(int timeoutMs, StringBuilder why)
         {
-            return RunMta(() =>
+            var sel = new Selection();
+            string text = await RunMta(() =>
             {
                 var el = AutomationElement.FocusedElement;
                 // Walk up a few levels: in browsers the focused node may be a child of the document.
@@ -51,6 +54,7 @@ namespace Rapcha.Win
                             if (sb.Length >= SelectionReader.MaxChars) break;
                         }
                         why.Append(" uia_ranges=" + ranges.Length);
+                        sel.HasTextPattern = true;
                         return sb.ToString();
                     }
                     el = TreeWalker.ControlViewWalker.GetParent(el);
@@ -58,6 +62,8 @@ namespace Rapcha.Win
                 why.Append(" uia_no_textpattern");
                 return "";
             }, timeoutMs, why, "uia_select");
+            sel.Text = text ?? "";
+            return sel;
         }
 
         /// <summary>

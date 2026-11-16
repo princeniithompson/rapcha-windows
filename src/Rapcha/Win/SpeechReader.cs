@@ -10,10 +10,8 @@ namespace Rapcha.Win
     /// Tracks the spoken word with SpeakProgress so the card can highlight the phrase and word.
     /// Created on the UI thread so its events arrive on the UI thread.
     /// </summary>
-    public sealed class SpeechReader : IDisposable
+    public sealed class SpeechReader : IReadAloud
     {
-        public enum State { Idle, Playing, Paused, Finished }
-
         private SpeechSynthesizer _synth;
         private Prompt _prompt;
         private int _baseChar;
@@ -21,7 +19,7 @@ namespace Rapcha.Win
 
         public ReadingPlan Plan { get; private set; }
         public int CurrentWord { get; private set; }
-        public State Status { get; private set; } = State.Idle;
+        public ReadState Status { get; private set; } = ReadState.Idle;
         public int ProgressEvents { get; private set; }
         public string VoiceName { get; private set; } = "";
 
@@ -42,38 +40,39 @@ namespace Rapcha.Win
             if (_silentOutput) _synth.SetOutputToWaveStream(new MemoryStream());
             else _synth.SetOutputToDefaultAudioDevice();
             VoiceName = _synth.Voice?.Name ?? "";
+            _synth.Rate = Math.Max(-10, Math.Min(10, (int)Math.Round((PiperVoice.Speed - 1.0) * 10)));
             _synth.SpeakProgress += OnProgress;
             _synth.SpeakCompleted += OnCompleted;
             return _synth;
         }
 
         /// <summary>Replaces whatever is being read with new text, from its first word.</summary>
-        public void Read(string text)
+        public void Read(string text, int startWord = 0)
         {
             Plan = ReadingPlan.Create(text);
             CurrentWord = 0;
             ProgressEvents = 0;
             if (Plan.IsEmpty) { Stop(); return; }
-            StartAt(0);
+            StartAt(Plan.Skip(0, startWord));
         }
 
         public void TogglePause()
         {
             if (Plan == null || Plan.IsEmpty) return;
-            if (Status == State.Playing) { Synth().Pause(); Status = State.Paused; Changed?.Invoke(); }
-            else if (Status == State.Paused)
+            if (Status == ReadState.Playing) { Synth().Pause(); Status = ReadState.Paused; Changed?.Invoke(); }
+            else if (Status == ReadState.Paused)
             {
-                if (_prompt != null) { Synth().Resume(); Status = State.Playing; Changed?.Invoke(); }
+                if (_prompt != null) { Synth().Resume(); Status = ReadState.Playing; Changed?.Invoke(); }
                 else StartAt(CurrentWord);
             }
-            else StartAt(Status == State.Finished ? 0 : CurrentWord);
+            else StartAt(Status == ReadState.Finished ? 0 : CurrentWord);
         }
 
         public void Skip(int delta)
         {
             if (Plan == null || Plan.IsEmpty) return;
             int target = Plan.Skip(CurrentWord, delta);
-            if (Status == State.Paused)
+            if (Status == ReadState.Paused)
             {
                 CancelPrompt();
                 CurrentWord = target;
@@ -86,7 +85,7 @@ namespace Rapcha.Win
         public void Stop()
         {
             CancelPrompt();
-            Status = State.Idle;
+            Status = ReadState.Idle;
             Changed?.Invoke();
         }
 
@@ -97,7 +96,7 @@ namespace Rapcha.Win
             _baseChar = Plan.Words[word].Start;
             var synth = Synth();
             _prompt = synth.SpeakAsync(Plan.TextFrom(word));
-            Status = State.Playing;
+            Status = ReadState.Playing;
             Changed?.Invoke();
         }
 
@@ -129,7 +128,7 @@ namespace Rapcha.Win
             if (e.Cancelled) return;
             if (e.Error != null) AppStorage.Log("Speech error: " + e.Error.Message);
             if (Plan != null && !Plan.IsEmpty) CurrentWord = Plan.Words.Count - 1;
-            Status = State.Finished;
+            Status = ReadState.Finished;
             Changed?.Invoke();
         }
 
@@ -143,7 +142,7 @@ namespace Rapcha.Win
                 try { _synth.Dispose(); } catch { }
                 _synth = null;
             }
-            Status = State.Idle;
+            Status = ReadState.Idle;
         }
     }
 }

@@ -1,78 +1,109 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows.Forms;
+using System.Threading;
+using Rapcha.Core;
 
 namespace Rapcha.Win
 {
     /// <summary>
-    /// While select-to-speak is on: a low-level mouse hook spots the end of a text selection in another app
-    /// (a drag release, or a double/triple click) and a low-level keyboard hook spots Esc. Input is never
-    /// blocked or changed; the hooks only watch. Both are removed when the mode is turned off.
+    /// While select-to-speak is on: watches (never blocks, never changes) the mouse and keyboard with
+    /// low-level hooks that live on their OWN thread, so Rapcha's drawing can never delay a click.
+    /// Only a real drag-selection in another app is reported (see SelectionGesture); clicks, double clicks
+    /// and window drags are ignored. Esc is reported so the mode can be turned off.
     /// </summary>
     public sealed class SelectionWatcher : IDisposable
     {
+        public sealed class Drag
+        {
+            public SelectionGesture.Result Gesture;
+            public IntPtr DownWindow;
+            public bool TextCursor;
+        }
+
         private readonly Native.HookProc _mouseProc;
         private readonly Native.HookProc _keyProc;
-        private IntPtr _mouseHook, _keyHook;
-        private readonly Timer _settle = new Timer();
         private readonly uint _myPid = Native.GetCurrentProcessId();
+        private readonly IntPtr _ibeam = Native.LoadCursor(IntPtr.Zero, (IntPtr)Native.IDC_IBEAM);
+        private IntPtr _mouseHook, _keyHook;
+        private Thread _thread;
+        private uint _threadId;
+        private SynchronizationContext _ui;
 
-        private Native.POINT _downPt, _lastUpPt;
-        private uint _lastUpTime;
-        private int _clicks;
-        private bool _downInOtherApp;
-        private IntPtr _downRoot;
+        private SelectionGesture _gesture;
+        private bool _down;
+        private IntPtr _downWindow, _downRoot;
         private Native.RECT _downRect;
+        private bool _ibeamAtDown;
 
-        public event Action SelectionFinished;
+        public event Action<Drag> DragSelection;
         public event Action EscapePressed;
 
         public SelectionWatcher()
         {
             _mouseProc = MouseProc;
             _keyProc = KeyProc;
-            _settle.Tick += (s, e) => { _settle.Stop(); SelectionFinished?.Invoke(); };
         }
 
-        public bool Running => _mouseHook != IntPtr.Zero;
+        public bool Running => _thread != null;
 
         public void Start()
         {
             if (Running) return;
-            var mod = Native.GetModuleHandle(null);
-            _mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc, mod, 0);
-            _keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _keyProc, mod, 0);
-            AppStorage.Log("Select-to-speak hooks: mouse=" + (_mouseHook != IntPtr.Zero) + " keyboard=" + (_keyHook != IntPtr.Zero) +
-                           (_mouseHook == IntPtr.Zero ? " error=" + Marshal.GetLastWin32Error() : ""));
+            _ui = SynchronizationContext.Current;
+            int threshold = Math.Max(SelectionGesture.DefaultThresholdPx, System.Windows.Forms.SystemInformation.DragSize.Width);
+            _gesture = new SelectionGesture(threshold);
+            using (var ready = new ManualResetEventSlim(false))
+            {
+                _thread = new Thread(() => HookThread(ready)) { IsBackground = true, Name = "Rapcha input watch" };
+                _thread.Start();
+                ready.Wait(2000);
+            }
+            AppStorage.Log("Select-to-speak hooks: mouse=" + (_mouseHook != IntPtr.Zero) + " keyboard=" + (_keyHook != IntPtr.Zero) + " threshold_px=" + threshold);
         }
 
         public void Stop()
         {
-            _settle.Stop();
-            if (_mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
-            if (_keyHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_keyHook); _keyHook = IntPtr.Zero; }
+            var t = _thread;
+            if (t == null) return;
+            _thread = null;
+            if (_threadId != 0) Native.PostThreadMessage(_threadId, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            t.Join(1500);
+            _threadId = 0;
+            _down = false;
         }
 
-        private bool IsOurs(Native.POINT pt)
+        private void HookThread(ManualResetEventSlim ready)
         {
-            var hwnd = Native.WindowFromPoint(pt);
-            if (hwnd == IntPtr.Zero) return false;
-            Native.GetWindowThreadProcessId(hwnd, out var pid);
-            return pid == _myPid;
+            _threadId = Native.GetCurrentThreadId();
+            Native.PeekMessage(out _, IntPtr.Zero, 0, 0, 0); // create this thread's message queue
+            var mod = Native.GetModuleHandle(null);
+            _mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc, mod, 0);
+            _keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _keyProc, mod, 0);
+            ready.Set();
+            try
+            {
+                while (Native.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0) { }
+            }
+            finally
+            {
+                if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
+                if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
+                _mouseHook = _keyHook = IntPtr.Zero;
+            }
         }
 
         private IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            // Only watching: every event is always passed on unchanged.
             try
             {
                 if (nCode >= 0)
                 {
                     int msg = wParam.ToInt32();
-                    if (msg == Native.WM_LBUTTONDOWN || msg == Native.WM_LBUTTONUP)
+                    if (msg == Native.WM_LBUTTONDOWN || msg == Native.WM_LBUTTONUP || (msg == Native.WM_MOUSEMOVE && _down))
                     {
                         var info = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
-                        if ((info.flags & Native.LLMHF_INJECTED) == 0) OnButton(msg == Native.WM_LBUTTONDOWN, info.pt, info.time);
+                        if ((info.flags & Native.LLMHF_INJECTED) == 0) OnMouse(msg, info.pt);
                     }
                 }
             }
@@ -80,32 +111,32 @@ namespace Rapcha.Win
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
-        private void OnButton(bool down, Native.POINT pt, uint time)
+        private void OnMouse(int msg, Native.POINT pt)
         {
-            var dbl = SystemInformation.DoubleClickSize;
-            if (down)
+            if (msg == Native.WM_MOUSEMOVE) { _gesture.OnMove(pt.X, pt.Y); return; }
+            if (msg == Native.WM_LBUTTONDOWN)
             {
-                _settle.Stop(); // a new click supersedes a pending capture (double -> triple click)
-                _downInOtherApp = !IsOurs(pt);
-                _downRoot = Native.GetAncestor(Native.WindowFromPoint(pt), Native.GA_ROOT);
+                _down = true;
+                _downWindow = Native.WindowFromPoint(pt);
+                _downRoot = Native.GetAncestor(_downWindow, Native.GA_ROOT);
                 Native.GetWindowRect(_downRoot, out _downRect);
-                bool near = Math.Abs(pt.X - _lastUpPt.X) <= dbl.Width && Math.Abs(pt.Y - _lastUpPt.Y) <= dbl.Height;
-                _clicks = (time - _lastUpTime <= Native.GetDoubleClickTime() && near) ? _clicks + 1 : 1;
-                _downPt = pt;
+                Native.GetWindowThreadProcessId(_downWindow, out var pid);
+                _ibeamAtDown = IsTextCursor();
+                _gesture.OnDown(pt.X, pt.Y, pid == _myPid || _downWindow == IntPtr.Zero, _ibeamAtDown);
                 return;
             }
-            _lastUpPt = pt;
-            _lastUpTime = time;
-            if (!_downInOtherApp) return;
-            var drag = SystemInformation.DragSize;
-            bool dragged = Math.Abs(pt.X - _downPt.X) > Math.Max(4, drag.Width) || Math.Abs(pt.Y - _downPt.Y) > Math.Max(4, drag.Height);
-            if (dragged && WindowMovedOrResized()) return; // dragging a window around is not a selection
-            if (dragged || _clicks >= 2)
-            {
-                // Give the app a moment to finish the selection; a following click cancels this.
-                _settle.Interval = _clicks >= 2 && !dragged ? (int)Math.Min(600, Native.GetDoubleClickTime()) : 150;
-                _settle.Start();
-            }
+            _down = false;
+            var r = _gesture.OnUp(pt.X, pt.Y, WindowMovedOrResized());
+            if (r.Kind != SelectionGesture.Kind.Drag) return;
+            var d = new Drag { Gesture = r, DownWindow = _downWindow, TextCursor = _ibeamAtDown || IsTextCursor() };
+            var h = DragSelection;
+            if (h != null) _ui?.Post(_ => h(d), null);
+        }
+
+        private bool IsTextCursor()
+        {
+            var ci = new Native.CURSORINFO { cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO)) };
+            return Native.GetCursorInfo(ref ci) && ci.hCursor == _ibeam;
         }
 
         private bool WindowMovedOrResized()
@@ -124,7 +155,7 @@ namespace Rapcha.Win
                     if (k.vkCode == Native.VK_ESCAPE && (k.flags & Native.LLKHF_INJECTED) == 0)
                     {
                         var h = EscapePressed;
-                        if (h != null) BeginInvokeOnUi(h);
+                        if (h != null) _ui?.Post(_ => h(), null);
                     }
                 }
             }
@@ -132,18 +163,6 @@ namespace Rapcha.Win
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
 
-        private void BeginInvokeOnUi(Action a)
-        {
-            // Hooks run on the UI thread already; defer so the hook returns immediately.
-            var t = new Timer { Interval = 1 };
-            t.Tick += (s, e) => { t.Stop(); t.Dispose(); a(); };
-            t.Start();
-        }
-
-        public void Dispose()
-        {
-            Stop();
-            _settle.Dispose();
-        }
+        public void Dispose() => Stop();
     }
 }

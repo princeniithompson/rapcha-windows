@@ -15,6 +15,12 @@ namespace Rapcha.Win
         private static void Main(string[] args)
         {
             if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
+            if (args.Length >= 2 && args[0] == "--selftest-piper")
+            {
+                try { Environment.ExitCode = SelfTest.Piper(args[1]); }
+                catch (Exception e) { AppStorage.Log("Selftest piper: " + e); Environment.ExitCode = 1; }
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-speak")
             {
                 // Runs beside any other copy (no single-instance hand-off, no shortcuts).

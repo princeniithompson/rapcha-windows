@@ -29,6 +29,12 @@ If the bubble says **"I can't hear your microphone"**, click **Fix microphone** 
 In Settings you can choose your microphone and watch the level bar move when you talk.
 Click **Cancel**, right-click the ring, or press **Esc** while it is listening to cancel. Right-click it any other time for **Settings** and **Exit**.
 
+## Select to speak
+
+Double-click the ring to turn it on (the screen edges glow). Then **drag over text** in any app and Rapcha reads it aloud, highlighting each phrase as it is spoken. Clicks are never touched: only a drag-selection is read. Double-click the ring again or press Esc to turn it off.
+
+The first time, Rapcha downloads its natural offline voice once (Piper with the "Lessac" US English voice, about 86 MB) to `%AppData%\Rapcha\piper`. Every file is checked against a pinned SHA-256. Until it is ready, or if there is no internet, the built-in Windows voice is used. Settings shows the voice status and a speed slider.
+
 ## For developers
 
 C# WinForms on .NET Framework 4.8 (already part of Windows 10 and 11), one small portable `Rapcha.exe` with no extra DLLs.

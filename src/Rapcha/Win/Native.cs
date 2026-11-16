@@ -190,6 +190,48 @@ namespace Rapcha.Win
             public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
         }
 
+        public const int WM_MOUSEMOVE = 0x0200;
+        public const int WM_QUIT = 0x0012;
+        public const int WM_NCHITTEST = 0x0084;
+        public const int HTCLIENT = 1;
+        public const int IDC_IBEAM = 32513;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public POINT pt; }
+        [DllImport("user32.dll")] public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
+        [DllImport("user32.dll")] public static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT ptScreenPos; }
+        [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO pci);
+        [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr name);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+        public const uint SMTO_ABORTIFHUNG = 0x0002;
+        [DllImport("user32.dll")] public static extern bool PhysicalToLogicalPointForPerMonitorDPI(IntPtr hWnd, ref POINT pt);
+
+        // waveOut (Piper playback)
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WAVEFORMATEX { public short wFormatTag, nChannels; public int nSamplesPerSec, nAvgBytesPerSec; public short nBlockAlign, wBitsPerSample, cbSize; }
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WAVEHDR { public IntPtr lpData; public int dwBufferLength, dwBytesRecorded; public IntPtr dwUser; public int dwFlags, dwLoops; public IntPtr lpNext, reserved; }
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MMTIME { public int wType; public int u; public int pad; }
+        public const int WHDR_DONE = 0x01;
+        public const int TIME_BYTES = 0x0004;
+        [DllImport("winmm.dll")] public static extern int waveOutOpen(out IntPtr hwo, int device, ref WAVEFORMATEX fmt, IntPtr callback, IntPtr instance, int flags);
+        [DllImport("winmm.dll")] public static extern int waveOutPrepareHeader(IntPtr hwo, IntPtr hdr, int size);
+        [DllImport("winmm.dll")] public static extern int waveOutUnprepareHeader(IntPtr hwo, IntPtr hdr, int size);
+        [DllImport("winmm.dll")] public static extern int waveOutWrite(IntPtr hwo, IntPtr hdr, int size);
+        [DllImport("winmm.dll")] public static extern int waveOutPause(IntPtr hwo);
+        [DllImport("winmm.dll")] public static extern int waveOutRestart(IntPtr hwo);
+        [DllImport("winmm.dll")] public static extern int waveOutReset(IntPtr hwo);
+        [DllImport("winmm.dll")] public static extern int waveOutClose(IntPtr hwo);
+        [DllImport("winmm.dll")] public static extern int waveOutGetPosition(IntPtr hwo, ref MMTIME time, int size);
+        [DllImport("winmm.dll")] public static extern int waveOutGetNumDevs();
+
         [DllImport("gdi32.dll")]
         public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER pbmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
     }

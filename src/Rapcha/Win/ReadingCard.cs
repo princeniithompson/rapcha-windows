@@ -24,7 +24,8 @@ namespace Rapcha.Win
         private readonly Timer _autoHide = new Timer { Interval = 1500 };
         private readonly DateTime _born = DateTime.UtcNow;
 
-        private SpeechReader _reader;
+        private IReadAloud _reader;
+        private string _note = "";
         private string _status = "";
         private int _dpi = 96, _x, _y, _w, _h;
         private int _shownPhrase = -1;
@@ -47,7 +48,7 @@ namespace Rapcha.Win
             _autoHide.Tick += (s, e) => { _autoHide.Stop(); Close2(); };
         }
 
-        public void Attach(SpeechReader reader)
+        public void Attach(IReadAloud reader)
         {
             if (_reader != null) _reader.Changed -= OnReaderChanged;
             _reader = reader;
@@ -77,6 +78,13 @@ namespace Rapcha.Win
             _anim.Start();
         }
 
+        /// <summary>A small line in the header, e.g. the voice download progress or a fallback note.</summary>
+        public string Note
+        {
+            get => _note;
+            set { _note = value ?? ""; if (Visible) Render(); }
+        }
+
         /// <summary>A short message in place of the text (e.g. "No text selected").</summary>
         public void ShowStatus(string status)
         {
@@ -97,7 +105,7 @@ namespace Rapcha.Win
         private void OnReaderChanged()
         {
             if (_reader == null || !Visible) return;
-            if (_reader.Status == SpeechReader.State.Finished) _autoHide.Start();
+            if (_reader.Status == ReadState.Finished) _autoHide.Start();
             else _autoHide.Stop();
             Render();
         }
@@ -134,18 +142,20 @@ namespace Rapcha.Win
 
                 int pad = S(18);
                 var plan = _reader?.Plan;
-                bool playing = _reader != null && _reader.Status == SpeechReader.State.Playing;
+                bool playing = _reader != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing);
 
                 // Header: a small pulsing dot and where we are.
                 double pulse = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 1.6);
                 int dot = S(8);
                 using (var b = new SolidBrush(Color.FromArgb(playing ? (int)(140 + 115 * pulse) : 120, 170, 200, 70)))
                     g.FillEllipse(b, pad, S(14), dot, dot);
-                string head = _reader == null ? "Select to speak" :
-                    _reader.Status == SpeechReader.State.Paused ? "Paused" :
-                    _reader.Status == SpeechReader.State.Finished ? "Done" : "Reading aloud";
+                string head = _note.Length > 0 ? _note : _reader == null ? "Select to speak" :
+                    _reader.Status == ReadState.Paused ? "Paused" :
+                    _reader.Status == ReadState.Preparing ? "Getting the voice ready…" :
+                    _reader.Status == ReadState.Finished ? "Done" : "Reading aloud";
                 using (var b = new SolidBrush(Color.FromArgb(200, 214, 220, 190)))
-                    g.DrawString(head, _smallFont, b, pad + dot + S(6), S(9));
+                    g.DrawString(head, _smallFont, b, new RectangleF(pad + dot + S(6), S(9), _w - 2 * pad - dot - S(70), S(18)),
+                        new StringFormat(StringFormatFlags.NoWrap) { Trimming = StringTrimming.EllipsisCharacter });
 
                 if (_status.Length > 0 || plan == null || plan.IsEmpty)
                 {
@@ -207,7 +217,7 @@ namespace Rapcha.Win
                     {
                         string s = plan.WordText(idx);
                         float y = y0 + li * lineH;
-                        if (idx == word && _reader.Status != SpeechReader.State.Finished)
+                        if (idx == word && _reader.Status != ReadState.Finished)
                         {
                             // soft glow behind the spoken word
                             var glowRect = new RectangleF(x - S(5), y + S(2), ww + S(10), lineH - S(2));

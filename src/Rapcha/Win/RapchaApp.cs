@@ -40,7 +40,10 @@ namespace Rapcha.Win
         private readonly EdgeGlow _glow = new EdgeGlow();
         private readonly SelectionWatcher _watcher = new SelectionWatcher();
         private readonly ReadingCard _card = new ReadingCard();
-        private SpeechReader _reader;
+        private IReadAloud _reader;
+        private bool _piperBroken;
+        private readonly bool _selfTestNoDownload;
+        private readonly Timer _readerIdle = new Timer { Interval = 5 * 60 * 1000 }; // free piper after 5 idle minutes
         private bool _selectMode;
         private int _captureGeneration;
         private readonly string _selfTestSpeak;
@@ -48,6 +51,7 @@ namespace Rapcha.Win
         public RapchaApp(string selfTestSpeak = null)
         {
             _selfTestSpeak = selfTestSpeak;
+            _selfTestNoDownload = selfTestSpeak != null;
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
@@ -60,7 +64,18 @@ namespace Rapcha.Win
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
             _ring.DoubleClicked += () => SetSelectMode(!_selectMode);
-            _watcher.SelectionFinished += OnSelectionFinished;
+            _watcher.DragSelection += OnDragSelection;
+            _readerIdle.Tick += (s, e) =>
+            {
+                if (_reader == null) { _readerIdle.Stop(); return; }
+                if (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing) return; // check again later
+                _readerIdle.Stop();
+                AppStorage.Log("Voice idle for 5 minutes: engine freed");
+                _card.Close2();
+                DisposeReader();
+            };
+            PiperVoice.StatusChanged += OnVoiceStatusChanged;
+            PiperVoice.Refresh();
             _watcher.EscapePressed += () => { if (_selectMode && _phase == Phase.Idle) SetSelectMode(false); };
             _card.ButtonClicked += OnCardButton;
             _ring.Moved += () => { if (_label.Visible) _label.HideNow(); };
@@ -344,8 +359,15 @@ namespace Rapcha.Win
                 _glow.Show();
                 _watcher.Start();
                 _ring.KeepOnTop();
-                AppStorage.Log("Select to speak on: screens=" + Screen.AllScreens.Length + " glow_windows=" + _glow.WindowCount);
-                ShowLabel("Select to speak is on. Select text in any app to hear it. Double-click the ring or press Esc to stop.", 4500);
+                AppStorage.Log("Select to speak on: screens=" + Screen.AllScreens.Length + " glow_windows=" + _glow.WindowCount +
+                               " voice=" + PiperVoice.Status + (PiperVoice.UnsupportedReason() != null ? " (" + PiperVoice.UnsupportedReason() + ")" : ""));
+                string msg = "Select to speak is on. Drag over text in any app to hear it. Double-click the ring or press Esc to stop.";
+                if (!_selfTestNoDownload && !PiperVoice.IsInstalled && PiperVoice.UnsupportedReason() == null)
+                {
+                    _ = PiperVoice.EnsureInstalledAsync();
+                    msg += " Downloading the natural voice, one time, " + PiperVoice.DownloadSizeText + ".";
+                }
+                ShowLabel(msg, 5000);
             }
             else
             {
@@ -353,52 +375,138 @@ namespace Rapcha.Win
                 _watcher.Stop();
                 _glow.Hide();
                 StopReading();
-                _reader?.Dispose();
-                _reader = null; // frees the voice engine while the mode is off
+                DisposeReader(); // frees the voice engine (and piper's memory) while the mode is off
                 AppStorage.Log("Select to speak off");
                 ShowLabel("Select to speak is off", 1500);
             }
         }
 
-        private SpeechReader Reader(bool silent = false)
+        private void DisposeReader()
         {
+            _readerIdle.Stop();
+            _reader?.Dispose();
+            _reader = null;
+            _card.Attach(null);
+        }
+
+        /// <summary>Piper when it is installed (and not known broken this session), otherwise the Windows voice.</summary>
+        private IReadAloud Reader()
+        {
+            bool wantPiper = PiperVoice.IsInstalled && !_piperBroken;
+            if (_reader != null && (_reader is PiperReader) != wantPiper) DisposeReader();
             if (_reader == null)
             {
-                _reader = new SpeechReader(silent);
+                if (wantPiper)
+                {
+                    var pr = new PiperReader(_selfTestSpeak != null ? new ClockPlayer() : null);
+                    pr.Failed += OnPiperFailed;
+                    _reader = pr;
+                }
+                else _reader = new SpeechReader(_selfTestSpeak != null);
                 _card.Attach(_reader);
             }
             return _reader;
         }
 
-        private async void OnSelectionFinished()
+        private void OnPiperFailed(string why, int atWord)
+        {
+            _piperBroken = true; // for this session; the next start tries Piper again
+            var text = _reader?.Plan?.Text;
+            DisposeReader();
+            if (string.IsNullOrEmpty(text) || !_selectMode) return;
+            _card.Note = "Natural voice stopped working. Using the Windows voice.";
+            StartReading(text, atWord);
+        }
+
+        private string _lastReadText = "";
+
+        private async void OnDragSelection(SelectionWatcher.Drag drag)
         {
             if (!_selectMode || _phase != Phase.Idle) return;
+            int gen = ++_captureGeneration;
+            await Task.Delay(120); // let the app finish updating its selection
+            if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle) return;
+
             var fg = Native.GetForegroundWindow();
             if (!TextDelivery.IsUsableTarget(fg)) return; // our own windows, the desktop, the taskbar
-            int gen = ++_captureGeneration;
+            // A drag that started on a title bar, border, menu or scroll bar is not a selection.
+            if (drag.DownWindow != IntPtr.Zero && Native.IsWindow(drag.DownWindow))
+            {
+                var pt = new Native.POINT(drag.Gesture.DownX, drag.Gesture.DownY);
+                try { Native.PhysicalToLogicalPointForPerMonitorDPI(drag.DownWindow, ref pt); } catch { }
+                var lp = (IntPtr)(((pt.Y & 0xFFFF) << 16) | (pt.X & 0xFFFF));
+                if (Native.SendMessageTimeout(drag.DownWindow, Native.WM_NCHITTEST, IntPtr.Zero, lp, Native.SMTO_ABORTIFHUNG, 200, out var hit) != IntPtr.Zero)
+                {
+                    long h = hit.ToInt64();
+                    bool frame = h == 2 || h == 3 || (h >= 5 && h <= 17) || h == 20 || h == 21; // caption, sysmenu, menu, scroll bars, buttons, borders, close, help
+                    if (frame) { AppStorage.Log("Selection: ignored drag on window frame (hit=" + h + ")"); return; }
+                }
+            }
+
             string text;
-            try { text = await SelectionReader.GetAsync(fg); }
+            try { text = await SelectionReader.GetAsync(fg, allowClipboard: drag.TextCursor); }
             catch (Exception e) { AppStorage.Log("Selection failed: " + e.GetType().Name); return; }
             if (gen != _captureGeneration || !_selectMode || _phase != Phase.Idle) return;
-            if (string.IsNullOrWhiteSpace(text)) return; // a plain click or nothing selected: stay quiet
+            if (string.IsNullOrWhiteSpace(text)) return; // nothing selected: stay quiet
+            bool stillReading = _reader != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Preparing || _reader.Status == ReadState.Paused);
+            if (text == _lastReadText && stillReading) return; // same selection already being read
             StartReading(text);
         }
 
-        private void StartReading(string text)
+        private void StartReading(string text, int startWord = 0)
         {
+            _lastReadText = text;
             _label.HideNow();
+            _readerIdle.Stop();
+            _readerIdle.Start();
             _card.Open(_ring.RingBounds, _ring.Edge, Dpi);
             try
             {
-                Reader().Read(text);
-                AppStorage.Log("Reading: words=" + _reader.Plan.Words.Count + " phrases=" + _reader.Plan.Phrases.Count + " voice=\"" + _reader.VoiceName + "\"");
+                var r = Reader();
+                if (!(r is PiperReader)) _card.Note = FallbackNote();
+                else if (_card.Note.StartsWith("Natural voice") || _card.Note.StartsWith("Downloading")) _card.Note = "";
+                r.Read(text, startWord);
+                AppStorage.Log("Reading: words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count + " engine=" + (r is PiperReader ? "piper" : "sapi") + " voice=\"" + r.VoiceName + "\"");
             }
             catch (Exception e)
             {
                 AppStorage.Log("Speech start failed: " + e.GetType().Name + " " + e.Message);
-                _reader?.Dispose(); _reader = null;
+                bool wasPiper = _reader is PiperReader;
+                DisposeReader();
+                if (wasPiper) { OnPiperFailedAtStart(text, startWord); return; }
                 _card.ShowStatus(SpeechReader.CountVoices() == 0 ? "No Windows voice is installed." : "No speaker found. Check your sound output.");
             }
+        }
+
+        private void OnPiperFailedAtStart(string text, int startWord)
+        {
+            _piperBroken = true;
+            _card.Note = "Natural voice couldn't start. Using the Windows voice.";
+            StartReading(text, startWord);
+        }
+
+        private string FallbackNote()
+        {
+            switch (PiperVoice.Status)
+            {
+                case PiperVoice.State.Downloading: return "Downloading voice, one time, " + PiperVoice.DownloadSizeText + " · " + PiperVoice.Percent + "% · Windows voice for now";
+                case PiperVoice.State.Failed: return "No internet for the natural voice. Using the Windows voice.";
+                case PiperVoice.State.Unsupported: return "Using the Windows voice (natural voice not supported here).";
+                default: return _piperBroken ? "Using the Windows voice." : "";
+            }
+        }
+
+        private void OnVoiceStatusChanged()
+        {
+            try
+            {
+                _ring.BeginInvoke(new Action(() =>
+                {
+                    if (_card.Visible && _reader != null && !(_reader is PiperReader)) _card.Note = FallbackNote();
+                    _settings?.UpdateVoiceStatus();
+                }));
+            }
+            catch { }
         }
 
         private void StopReading()
@@ -420,16 +528,16 @@ namespace Rapcha.Win
         }
 
         /// <summary>
-        /// CI hook (--selftest-speak "text"): toggles the mode on like a double-click, reads the text with the
-        /// offline voice into memory (runners may have no sound card), checks word progress, toggles off, exits.
-        /// Exit codes: 0 ok, 2 no voice installed, 1 failure.
+        /// CI hook (--selftest-speak "text"): toggles the mode on like a double-click, reads the text with whichever
+        /// voice the app would choose (Piper if installed, else the Windows voice) into a silent clock instead of the
+        /// speakers, checks word progress, toggles off, exits. Exit codes: 0 ok, 2 no voice at all, 1 failure.
         /// </summary>
         private void RunSpeakSelfTest()
         {
             int voices = SpeechReader.CountVoices();
-            AppStorage.Log("Selftest speak: voices=" + voices);
-            if (voices == 0) { SelfTestExit(2); return; }
-            var deadline = new Timer { Interval = 30000 };
+            AppStorage.Log("Selftest speak: sapi_voices=" + voices + " piper_installed=" + PiperVoice.IsInstalled);
+            if (voices == 0 && !PiperVoice.IsInstalled) { SelfTestExit(2); return; }
+            var deadline = new Timer { Interval = 90000 };
             deadline.Tick += (s, e) => { deadline.Stop(); AppStorage.Log("Selftest speak: timed out"); SelfTestExit(1); };
             deadline.Start();
             var go = new Timer { Interval = 1500 };
@@ -438,20 +546,26 @@ namespace Rapcha.Win
                 go.Stop();
                 _ring.SimulateDoubleClick();
                 if (!_selectMode || !_glow.Active || !_watcher.Running) { AppStorage.Log("Selftest speak: mode did not turn on"); SelfTestExit(1); return; }
-                var r = Reader(silent: true);
+                StartReading(_selfTestSpeak);
+                var r = _reader;
+                if (r == null) { SelfTestExit(1); return; }
+                bool skipped = false;
                 r.Changed += () =>
                 {
-                    if (r.Status != SpeechReader.State.Finished) return;
+                    // Exercise Forward 10 once mid-way on long texts.
+                    if (!skipped && r.Plan.Words.Count > 25 && r.CurrentWord >= 3 && r.Status == ReadState.Playing) { skipped = true; r.Skip(ReadingPlan.SkipWords); AppStorage.Log("Selftest speak: forward 10 -> word " + r.CurrentWord); }
+                    if (r.Status != ReadState.Finished) return;
                     deadline.Stop();
-                    bool ok = r.ProgressEvents > 0 && r.CurrentWord == r.Plan.Words.Count - 1;
-                    AppStorage.Log("Selftest speak: finished words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count +
-                                   " progress_events=" + r.ProgressEvents + " voice=\"" + r.VoiceName + "\" ok=" + ok);
+                    var pr = r as PiperReader;
+                    bool ok = r.ProgressEvents > 0 && r.CurrentWord == r.Plan.Words.Count - 1 && (pr == null || pr.PcmBytes > 0);
+                    AppStorage.Log("Selftest speak: finished engine=" + (pr != null ? "piper" : "sapi") + " words=" + r.Plan.Words.Count + " phrases=" + r.Plan.Phrases.Count +
+                                   " progress_events=" + r.ProgressEvents + (pr != null ? " segments=" + pr.Segments + " pcm_bytes=" + pr.PcmBytes : "") +
+                                   " voice=\"" + r.VoiceName + "\" ok=" + ok);
                     _ring.SimulateDoubleClick();
                     bool off = !_selectMode && !_glow.Active && !_watcher.Running;
                     AppStorage.Log("Selftest speak: mode off=" + off);
                     SelfTestExit(ok && off ? 0 : 1);
                 };
-                StartReading(_selfTestSpeak);
             };
             go.Start();
         }
@@ -468,7 +582,8 @@ namespace Rapcha.Win
         {
             _watcher.Dispose();
             _glow.Dispose();
-            _reader?.Dispose();
+            PiperVoice.StatusChanged -= OnVoiceStatusChanged;
+            DisposeReader();
             _card.Close();
             Cancel(null);
             _tray.Visible = false;

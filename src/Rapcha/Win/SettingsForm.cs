@@ -24,6 +24,11 @@ namespace Rapcha.Win
         private readonly Button _save = new Button();
         private readonly Button _copyLog = new Button();
         private readonly Label _status = new Label();
+        private readonly Label _voiceStatus = new Label();
+        private readonly Button _voiceDownload = new Button();
+        private readonly LinkLabel _vcLink = new LinkLabel();
+        private readonly TrackBar _speed = new TrackBar();
+        private readonly Label _speedLabel = new Label();
         private readonly List<string> _terms;
         private readonly Timer _meterCheck = new Timer { Interval = 500 };
 
@@ -45,7 +50,7 @@ namespace Rapcha.Win
             MinimizeBox = true;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
-            ClientSize = new Size(540, 780);
+            ClientSize = new Size(540, 940);
 
             var layout = new TableLayoutPanel
             {
@@ -110,6 +115,29 @@ namespace Rapcha.Win
             _remove.AutoSize = true;
             _remove.Click += (s, e) => RemoveWord();
 
+            // Read-aloud voice
+            _voiceStatus.AutoSize = true;
+            _voiceStatus.MaximumSize = new Size(490, 0);
+            _voiceDownload.Text = "Download natural voice (" + PiperVoice.DownloadSizeText + ")";
+            _voiceDownload.AutoSize = true;
+            _voiceDownload.Click += (s, e) => { _ = PiperVoice.EnsureInstalledAsync(); UpdateVoiceStatus(); };
+            _vcLink.Text = "Get the Microsoft Visual C++ Runtime (x64), then reopen Rapcha";
+            _vcLink.AutoSize = true;
+            _vcLink.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo(PiperVoice.VcRuntimeUrl) { UseShellExecute = true }); } catch { } };
+            var speedRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true, Margin = new Padding(0) };
+            speedRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            speedRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _speed.Minimum = 7; _speed.Maximum = 15; _speed.TickFrequency = 1; _speed.SmallChange = 1; _speed.LargeChange = 1;
+            _speed.Dock = DockStyle.Fill;
+            _speed.Value = (int)Math.Round(PiperVoice.Speed * 10);
+            _speedLabel.AutoSize = true;
+            _speedLabel.Anchor = AnchorStyles.Left;
+            _speed.ValueChanged += (s, e) => { PiperVoice.Speed = _speed.Value / 10.0; ShowSpeed(); };
+            ShowSpeed();
+            speedRow.Controls.Add(_speed, 0, 0);
+            speedRow.Controls.Add(_speedLabel, 1, 0);
+            UpdateVoiceStatus();
+
             // Bottom
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Margin = new Padding(0, 10, 0, 0) };
             _save.Text = "Save";
@@ -141,6 +169,12 @@ namespace Rapcha.Win
             layout.Controls.Add(addRow);
             layout.Controls.Add(_words);
             layout.Controls.Add(_remove);
+            layout.Controls.Add(Title("Read aloud voice"));
+            layout.Controls.Add(Help("Double-click the ring for select to speak, then drag over text in any app."));
+            layout.Controls.Add(_voiceStatus);
+            layout.Controls.Add(_voiceDownload);
+            layout.Controls.Add(_vcLink);
+            layout.Controls.Add(speedRow);
             layout.Controls.Add(_status);
             layout.Controls.Add(bottom);
             layout.RowCount = layout.Controls.Count;
@@ -167,6 +201,21 @@ namespace Rapcha.Win
             StopMeter();
             _meterCheck.Dispose();
             base.OnFormClosed(e);
+        }
+
+        private void ShowSpeed() => _speedLabel.Text = "Speed " + (_speed.Value / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "×";
+
+        /// <summary>Refreshes the voice line (called when the download progresses).</summary>
+        public void UpdateVoiceStatus()
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { try { BeginInvoke(new Action(UpdateVoiceStatus)); } catch { } return; }
+            _voiceStatus.Text = PiperVoice.Describe();
+            _voiceStatus.ForeColor = PiperVoice.Status == PiperVoice.State.Ready ? Color.FromArgb(30, 110, 40)
+                : PiperVoice.Status == PiperVoice.State.Failed || PiperVoice.Status == PiperVoice.State.Unsupported ? Color.FromArgb(150, 30, 30)
+                : SystemColors.ControlText;
+            _voiceDownload.Visible = PiperVoice.Status == PiperVoice.State.NotInstalled || PiperVoice.Status == PiperVoice.State.Failed;
+            _vcLink.Visible = PiperVoice.Status == PiperVoice.State.Unsupported && Environment.Is64BitOperatingSystem && !PiperVoice.HasVcRuntime();
         }
 
         public static void OpenMicrophoneSettings()
