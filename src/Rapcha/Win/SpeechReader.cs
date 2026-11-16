@@ -140,6 +140,15 @@ namespace Rapcha.Win
             StartAt(target);
         }
 
+        public void JumpTo(int word)
+        {
+            if (Plan == null || Plan.IsEmpty) return;
+            Skip(Math.Max(0, Math.Min(Plan.Words.Count - 1, word)) - CurrentWord);
+        }
+
+        /// <summary>SAPI starts speaking within a few tens of milliseconds: nothing to prepare.</summary>
+        public void PrepareAt(int word) { }
+
         public void Stop()
         {
             CancelPrompt();

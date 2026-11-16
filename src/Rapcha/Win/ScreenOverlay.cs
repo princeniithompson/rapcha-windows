@@ -47,7 +47,7 @@ namespace Rapcha.Win
         private Box? _pendingBox;
         private readonly Dictionary<Control, Rectangle> _controls = new Dictionary<Control, Rectangle>();
         private Control _pressed = Control.None;
-        private Font _font, _small;
+        private Font _font, _small, _badge;
 
         // The snapped text is outlined (numbered when there are several blocks) the moment reading starts; the
         // outlines soften after this long. Reading never waits for them.
@@ -60,6 +60,46 @@ namespace Rapcha.Win
         public bool Previewing => _preparing > 0 || _pendingBox.HasValue || _pendingTap.HasValue || _selector.Current == BoxSelector.State.TapPending;
         private int _preparing;
         public int PreviewParts { get; private set; }
+
+        // ---- Previous / Next (v15): one segment per paragraph, list item or heading ----
+        private readonly ReadingNav _nav = new ReadingNav(() => Now());
+        private bool _canLeave;                 // a tap: Next / Previous may go on into the neighbouring blocks
+        private TextBlock _navFirstBlock, _navLastBlock;
+        private int _preparedSeg = -1;
+        private DateTime _navAt;
+        private bool _waitNavAudio;
+        public ReadingNav Nav => _nav;
+        /// <summary>Previous / Next pressed to the first audio of where it went, ms; -1 until it happens.</summary>
+        public int NavFirstAudioMs { get; private set; } = -1;
+        public string LastNav { get; private set; } = "";
+        public int NavCount { get; private set; }
+        /// <summary>Previous / Next (buttons and keys) work only while something is being read or is paused.</summary>
+        public bool NavActive => _reader != null && _spoken != null &&
+                                 (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Paused || _reader.Status == ReadState.Preparing);
+
+        // ---- Outlines and number badges (v15) ----
+        private BadgeLayout.Result _layout;
+        private bool _badgesOn = VoiceSettings.ShowBadges;
+        /// <summary>The outlines and badges as drawn (overlay pixels), for the self-test.</summary>
+        public List<Box> PreviewOutlines => _layout?.Outlines.ToList() ?? new List<Box>();
+        public List<Box> PreviewBadges => _layout != null && _badgesOn ? _layout.Badges.ToList() : new List<Box>();
+        /// <summary>Self-test: where a reading-bar button is (overlay pixels), empty when hidden.</summary>
+        public Rectangle ControlRect(Control c) => _controls.TryGetValue(c, out var r) ? r : Rectangle.Empty;
+        /// <summary>Self-test: the word box the green highlight is on (or moving to).</summary>
+        public Box HighlightTarget => _hlVisible ? _hlTarget : new Box();
+        public SpokenText Spoken => _spoken;
+        /// <summary>The spoken word (index into <see cref="Spoken"/>) the voice is at.</summary>
+        public int CurrentSpokenWord
+        {
+            get
+            {
+                if (_reader == null || _spoken == null) return -1;
+                int cw = _reader.CurrentWord;
+                var plan = _reader.Plan;
+                return plan != null && cw >= 0 && cw < plan.Words.Count ? _spoken.WordAtChar(plan.Words[cw].Start) : Math.Max(0, cw);
+            }
+        }
+        public bool BadgesOn { get => _badgesOn; set { _badgesOn = value; LayoutPreview(); Invalidate(); } }
 
         public string LastReadText { get; private set; } = "";
         /// <summary>The OCR words of the last read, in order (the screen's own text, before code is made sayable).</summary>
@@ -130,6 +170,7 @@ namespace Rapcha.Win
             }
             _font = new Font("Segoe UI", S(15), FontStyle.Regular, GraphicsUnit.Pixel);
             _small = new Font("Segoe UI Semibold", S(13), FontStyle.Regular, GraphicsUnit.Pixel);
+            _badge = new Font("Segoe UI", S(9.5f), FontStyle.Bold, GraphicsUnit.Pixel);
             _anim.Tick += (s, e) => Animate();
             _previewTimer.Tick += (s, e) =>
             {
@@ -382,6 +423,7 @@ namespace Rapcha.Win
                            " words=" + parts.Sum(p => p.Words.Count) + " snap_ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds +
                            " kinds=" + string.Join(",", parts.Select(p => p.Kind.ToString()[0] + ":" + (int)(p.LineCoverage * 100) + "%")));
             if (parts.Count == 0) { Say(NoTextThere); return; }
+            _canLeave = false;
             Show(parts);
         }
 
@@ -430,6 +472,7 @@ namespace Rapcha.Win
             if (part != null)
             {
                 AppStorage.Log("Overlay tap: paragraph lines=" + part.Words.Select(w => w.Line).Distinct().Count() + " words=" + part.Words.Count + " index=" + LastIndexState);
+                _canLeave = true;
                 Show(new List<SnapPart> { part });
                 return;
             }
@@ -456,6 +499,7 @@ namespace Rapcha.Win
             AppStorage.Log("Overlay tap patch: passes=" + r.Passes.Count + " found=" + (part != null) + " ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
             LastIndexState = "patch";
             if (part == null) { Say(NoTextThere); return; }
+            _canLeave = true;
             Show(new List<SnapPart> { part });
         }
 
@@ -467,12 +511,112 @@ namespace Rapcha.Win
             _preview = parts;
             PreviewParts = parts.Count;
             _previewStrong = true;
+            LayoutPreview();
             InvalidatePreview();
             _previewTimer.Stop();
             _previewTimer.Start();
             var words = PageLayout.Dedupe(PageLayout.WordsOf(parts));   // across blocks too: never a word twice
             WordsReadyMs = (int)(DateTime.UtcNow - _releaseAt).TotalMilliseconds;
+            _navFirstBlock = parts[0].Block;
+            _navLastBlock = parts[parts.Count - 1].Block;
             ReadWords(words);
+            if (_spoken != null && ReferenceEquals(_spoken.Words.Count > 0 ? _spoken.Words[0] : null, words.Count > 0 ? words[0] : null))
+            {
+                _nav.Reset(Segments.Build(words), _canLeave);
+                _nav.HasNextBlock = PageBlock(_navLastBlock) != null && CurrentPage.Neighbour(_navLastBlock, +1) != null;
+                _nav.HasPreviousBlock = PageBlock(_navFirstBlock) != null && CurrentPage.Neighbour(_navFirstBlock, -1) != null;
+                _preparedSeg = -1;
+                PrepareNextSegment();
+            }
+        }
+
+        /// <summary>The block if it belongs to the current page (a tap's closer look builds its own small page).</summary>
+        private TextBlock PageBlock(TextBlock b) => b != null && CurrentPage != null && CurrentPage.Blocks.Contains(b) ? b : null;
+
+        /// <summary>
+        /// Where the outlines and number badges go: outlines trimmed so neighbours never overlap; small badges
+        /// (15 px at 100%) outside each block's left margin, never on text, another outline or another badge.
+        /// </summary>
+        private void LayoutPreview()
+        {
+            if (_preview == null) { _layout = null; return; }
+            var blocks = _preview.Select(p => p.Box).ToList();
+            var first = _preview.Select(p =>
+            {
+                if (p.Words.Count == 0) return p.Box;
+                int line = p.Words[0].Line;
+                return p.Words.Where(w => w.Line == line).Aggregate(new Box(), (u, w) => u.Union(w.Box));
+            }).ToList();
+            var text = CurrentPage?.Lines.SelectMany(l => l.Words).Select(w => w.Box).ToList() ?? new List<Box>();
+            text.AddRange(_preview.SelectMany(p => p.Words).Select(w => w.Box));
+            var bottom = ClientSize.Height - S(40) - S(48) - S(8);   // keep clear of the reading pill
+            _layout = BadgeLayout.Place(blocks, first, text, new Box(S(2), S(2), ClientSize.Width - S(4), Math.Max(S(10), bottom - S(2))), S(5), S(15), S(3), _badgesOn);
+        }
+
+        // ---------------- Previous / Next ----------------
+
+        /// <summary>Plan word (what the voice counts) of a spoken OCR word.</summary>
+        private int PlanWord(int ocrWord)
+        {
+            var plan = _reader?.Plan;
+            if (plan == null || _spoken == null || _spoken.Count == 0) return Math.Max(0, ocrWord);
+            ocrWord = Math.Max(0, Math.Min(_spoken.Count - 1, ocrWord));
+            return plan.WordAtChar(_spoken.StartOf(ocrWord));
+        }
+
+        /// <summary>The next segment's first piece is made while this one plays (OneCore; SAPI needs nothing).</summary>
+        private void PrepareNextSegment()
+        {
+            if (_reader == null || _nav.List.Count == 0) return;
+            int cur = Math.Max(0, _nav.Current);
+            if (cur == _preparedSeg) return;
+            _preparedSeg = cur;
+            if (cur + 1 < _nav.List.Count) { try { _reader.PrepareAt(PlanWord(_nav.List[cur + 1].First)); } catch { } }
+        }
+
+        public void NavNext() => Navigate(true);
+        public void NavPrevious() => Navigate(false);
+
+        private void Navigate(bool next)
+        {
+            if (!NavActive) return;
+            var mv = next ? _nav.Next() : _nav.Previous();
+            LastNav = (next ? "next:" : "previous:") + mv.Kind;
+            NavCount++;
+            bool paused = _reader.Status == ReadState.Paused;
+            switch (mv.Kind)
+            {
+                case ReadingNav.Kind.Jump:
+                    MarkNav(paused);
+                    _reader.JumpTo(PlanWord(mv.Word));
+                    break;
+                case ReadingNav.Kind.NextBlock:
+                case ReadingNav.Kind.PreviousBlock:
+                {
+                    var b = CurrentPage?.Neighbour(next ? _navLastBlock : _navFirstBlock, next ? +1 : -1);
+                    if (b == null) goto case ReadingNav.Kind.Finished;
+                    MarkNav(false);
+                    _canLeave = true;
+                    Show(new List<SnapPart> { CurrentPage.PartOf(b) });
+                    break;
+                }
+                case ReadingNav.Kind.Finished:
+                    _waitNavAudio = false;
+                    _reader.Stop();
+                    HideHighlight();
+                    _status = "Finished";   // no sound, the overlay stays open
+                    break;
+            }
+            AppStorage.Log("Overlay nav: " + LastNav + " segment=" + mv.Segment + "/" + _nav.List.Count + (paused ? " paused" : ""));
+            InvalidateBottom();
+        }
+
+        private void MarkNav(bool paused)
+        {
+            _navAt = DateTime.UtcNow;
+            NavFirstAudioMs = -1;
+            _waitNavAudio = !paused;
+            MarkHot(1500);   // the background index waits so the voice starts at once
         }
 
         private void CancelPreview()
@@ -486,6 +630,7 @@ namespace Rapcha.Win
         {
             if (_preview == null) return;
             foreach (var p in _preview) Invalidate(BoxRect(p.Box.Inflate(S(8))));
+            if (_layout != null) foreach (var b in _layout.Outlines.Concat(_layout.Badges)) Invalidate(BoxRect(b.Inflate(S(4))));
         }
 
         private void ReadWords(List<OcrWord> words)
@@ -537,12 +682,20 @@ namespace Rapcha.Win
                                " index=" + LastIndexState + " passes=" + (_ocr?.Passes.Count ?? 0) + " voice=" + (_reader is OneCoreReader ? "onecore" : "sapi") +
                                " open_age_ms=" + (int)(_releaseAt - _openedAt).TotalMilliseconds);
             }
+            if (_waitNavAudio && _reader.Status == ReadState.Playing && _reader.AudioStartedAt != DateTime.MinValue && _reader.AudioStartedAt >= _navAt)
+            {
+                _waitNavAudio = false;
+                NavFirstAudioMs = (int)(_reader.AudioStartedAt - _navAt).TotalMilliseconds;
+                AppStorage.Log("Overlay nav latency: " + LastNav + " press_to_audio_ms=" + NavFirstAudioMs + " voice=" + (_reader is OneCoreReader ? "onecore" : "sapi"));
+            }
             if (_spoken != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Paused))
             {
                 // The voice's word (it may say a code token as several words) maps back to the OCR word by position.
                 int cw = _reader.CurrentWord;
                 var plan = _reader.Plan;
                 int ocrWord = plan != null && cw >= 0 && cw < plan.Words.Count ? _spoken.WordAtChar(plan.Words[cw].Start) : Math.Max(0, cw);
+                _nav.OnWord(ocrWord);
+                PrepareNextSegment();
                 var target = _spoken.HighlightFor(ocrWord);
                 if (!_hlVisible || !SameBox(target, _hlTarget))
                 {
@@ -576,8 +729,8 @@ namespace Rapcha.Win
         {
             switch (c)
             {
-                case Control.Back: _reader?.Skip(-ReadingPlan.SkipWords); break;
-                case Control.Forward: _reader?.Skip(ReadingPlan.SkipWords); break;
+                case Control.Back: NavPrevious(); break;      // v15: Previous / Next paragraph or list item
+                case Control.Forward: NavNext(); break;
                 case Control.PlayPause: _reader?.TogglePause(); break;
                 case Control.Stop: CancelPreview(); _reader?.Stop(); HideHighlight(); break;
                 case Control.Close: Close(); break;
@@ -600,8 +753,15 @@ namespace Rapcha.Win
                     else Close();
                     break;
                 case Keys.Space: Use(Control.PlayPause); break;
-                case Keys.Left: Use(Control.Back); break;
-                case Keys.Right: Use(Control.Forward); break;
+                // Previous / Next only while reading (or paused); otherwise the keys are left alone.
+                case Keys.Left:
+                case Keys.PageUp:
+                    if (NavActive) { Use(Control.Back); e.Handled = true; }
+                    break;
+                case Keys.Right:
+                case Keys.PageDown:
+                    if (NavActive) { Use(Control.Forward); e.Handled = true; }
+                    break;
             }
         }
 
@@ -814,29 +974,28 @@ namespace Rapcha.Win
                 using (var pen = new Pen(Color.FromArgb(150, Green), S(2))) g.DrawPath(pen, path);
             }
 
-            if (_preview != null)
+            if (_preview != null && _layout != null)
             {
-                int n = 0;
-                foreach (var p in _preview)
+                for (int i = 0; i < _preview.Count && i < _layout.Outlines.Count; i++)
                 {
-                    n++;
-                    var b = p.Box.Inflate(S(5));
+                    var b = _layout.Outlines[i];
                     var r = new RectangleF((float)b.X, (float)b.Y, (float)b.W, (float)b.H);
-                    using (var path = Rounded(r, S(12)))
+                    using (var path = Rounded(r, S(10)))
                     {
                         using (var fill = new SolidBrush(Color.FromArgb(_previewStrong ? 34 : 14, Green))) g.FillPath(fill, path);
                         using (var pen = new Pen(Color.FromArgb(_previewStrong ? 200 : 90, Green), S(_previewStrong ? 2 : 1.4))) g.DrawPath(pen, path);
                     }
-                    if (_preview.Count > 1 || _previewStrong)
-                    {
-                        float d = S(20);
-                        var badge = new RectangleF(r.X - d * 0.4f, r.Y - d * 0.4f, d, d);
-                        using (var bb = new SolidBrush(Color.FromArgb(_previewStrong ? 235 : 150, Green))) g.FillEllipse(bb, badge);
-                        using (var ink = new SolidBrush(Color.FromArgb(15, 40, 20)))
-                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString(n.ToString(), _small, ink, badge, sf);
-                    }
                 }
+                if (_badgesOn)
+                    for (int i = 0; i < _layout.Badges.Count; i++)
+                    {
+                        var c = _layout.Badges[i];
+                        var badge = new RectangleF((float)c.X, (float)c.Y, (float)c.W, (float)c.H);
+                        using (var bb = new SolidBrush(Color.FromArgb(_previewStrong ? 240 : 190, Green))) g.FillEllipse(bb, badge);
+                        using (var ink = new SolidBrush(Color.FromArgb(10, 34, 16)))
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            g.DrawString((i + 1).ToString(), _badge, ink, new RectangleF(badge.X - S(2), badge.Y + S(0.5f), badge.Width + S(4), badge.Height), sf);
+                    }
             }
 
             if (_hlVisible)
@@ -919,7 +1078,6 @@ namespace Rapcha.Win
             float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, u = r.Width / 32f;
             using (var brush = new SolidBrush(ink))
             using (var pen = new Pen(ink, 2f * u) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-            using (var tiny = new Font("Segoe UI", 8f * u, FontStyle.Bold, GraphicsUnit.Pixel))
             {
                 switch (b)
                 {
@@ -935,13 +1093,15 @@ namespace Rapcha.Win
                         g.FillRectangle(brush, cx - 5.5f * u, cy - 5.5f * u, 11 * u, 11 * u);
                         break;
                     default:
+                    {
+                        // Previous / Next (v15): a bar and a triangle, like a media player's skip-track buttons.
                         bool back = b == Control.Back;
-                        g.DrawArc(pen, new RectangleF(cx - 9 * u, cy - 9 * u, 18 * u, 18 * u), back ? 200 : -20, back ? 250 : -250);
-                        float ax = back ? cx - 8.5f * u : cx + 8.5f * u, ay = cy - 5 * u;
-                        g.FillPolygon(brush, new[] { new PointF(ax - 3 * u, ay - 1 * u), new PointF(ax + 3 * u, ay - 1 * u), new PointF(ax, ay + 4 * u) });
-                        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                        g.DrawString("10", tiny, brush, new RectangleF(cx - 8 * u, cy - 6 * u, 16 * u, 14 * u), sf);
+                        float dir = back ? -1 : 1;
+                        float bx = cx + dir * 6.5f * u;
+                        g.FillRectangle(brush, bx - 1.3f * u, cy - 6.5f * u, 2.6f * u, 13 * u);
+                        g.FillPolygon(brush, new[] { new PointF(cx - dir * 6 * u, cy - 6.5f * u), new PointF(cx + dir * 4.5f * u, cy), new PointF(cx - dir * 6 * u, cy + 6.5f * u) });
                         break;
+                    }
                 }
             }
         }
@@ -991,6 +1151,7 @@ namespace Rapcha.Win
                 _dark.Dispose();
                 _font.Dispose();
                 _small.Dispose();
+                _badge.Dispose();
                 _ocr = null;
                 _spoken = null;
             }

@@ -43,6 +43,31 @@ namespace Rapcha.Win
             }
         }
 
+        private static bool? _badges;
+        private static string BadgesPath => Path.Combine(AppStorage.Folder, "number-badges.txt");
+        public const bool DefaultShowBadges = true;
+
+        /// <summary>Select to speak: number badges (1, 2, 3) beside the outlined blocks. Saved; on by default.</summary>
+        public static bool ShowBadges
+        {
+            get
+            {
+                if (_badges.HasValue) return _badges.Value;
+                bool v = DefaultShowBadges;
+                try { if (File.Exists(BadgesPath)) v = File.ReadAllText(BadgesPath).Trim() != "0"; } catch { }
+                _badges = v;
+                return v;
+            }
+            set
+            {
+                _badges = value;
+                try { File.WriteAllText(BadgesPath, value ? "1" : "0"); } catch { }
+            }
+        }
+
+        /// <summary>Forget the cached value (the self-test checks what was saved on disk).</summary>
+        internal static void ReloadBadges() => _badges = null;
+
         public static int SapiRate => Math.Max(-10, Math.Min(10, (int)Math.Round((Speed - 1.0) * 10)));
 
         private static double Clamp(double v) => Math.Max(0.7, Math.Min(1.5, v));

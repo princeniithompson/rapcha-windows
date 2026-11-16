@@ -17,6 +17,10 @@ namespace Rapcha.Win
         void Read(string text, int startWord = 0);
         void TogglePause();
         void Skip(int delta);
+        /// <summary>Reads on from a word (Previous / Next); while paused it only moves there and waits for Play.</summary>
+        void JumpTo(int word);
+        /// <summary>Starts making the audio from a word ahead of time (the next segment), so Next starts at once.</summary>
+        void PrepareAt(int word);
         void Stop();
         /// <summary>Creates the engine and opens the audio output now (no sound), so the first read starts at once.</summary>
         void Prime();

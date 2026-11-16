@@ -372,13 +372,27 @@ namespace Rapcha.Core
             var line = NearestLine(x, y, maxDist);
             if (line == null) return null;
             var b = BlockOf(line);
+            if (b == null) { var lone = new SnapPart { Kind = SnapKind.Lines, AreaCoverage = 1, LineCoverage = 1 }; lone.Words.AddRange(Dedupe(line.Words)); lone.Box = line.Box; return lone; }
+            return PartOf(b);
+        }
+
+        /// <summary>A whole block, read as one part (a tap's paragraph, or a neighbouring block for Previous / Next).</summary>
+        public SnapPart PartOf(TextBlock b)
+        {
             var part = new SnapPart { Block = b, Kind = SnapKind.Whole, AreaCoverage = 1, LineCoverage = 1 };
-            if (b == null) { part.Kind = SnapKind.Lines; part.Words.AddRange(Dedupe(line.Words)); part.Box = line.Box; return part; }
             var words = new List<OcrWord>();
             foreach (var l in b.Lines) words.AddRange(l.Words.OrderBy(w => w.Box.X));
             part.Words.AddRange(Dedupe(words));
             part.Box = b.Box;
             return part;
+        }
+
+        /// <summary>The block after / before one in reading order (null at the ends).</summary>
+        public TextBlock Neighbour(TextBlock b, int step)
+        {
+            if (b == null) return null;
+            int i = Blocks.IndexOf(b) + step;
+            return i >= 0 && i < Blocks.Count ? Blocks[i] : null;
         }
 
         /// <summary>

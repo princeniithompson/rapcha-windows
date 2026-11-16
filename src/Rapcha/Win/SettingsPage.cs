@@ -33,6 +33,9 @@ namespace Rapcha.Win
         private readonly PillButton _editVoice = new PillButton { Text = "Edit" };
         private readonly PillButton _resetVoice = new PillButton { Text = "Reset" };
         private readonly Label _lockNote = new Label();
+        private readonly CheckBox _badges = new CheckBox { Text = "Show number badges", AutoSize = true };
+        private bool _pendingBadges = VoiceSettings.ShowBadges;
+        internal CheckBox BadgesToggle => _badges;
         private bool _voiceLocked = true, _haveVoices;
         private string _pendingVoiceId;
         private double _pendingSpeed = VoiceSettings.Speed;
@@ -162,7 +165,7 @@ namespace Rapcha.Win
                 _shortcuts));
             _layout.Controls.Add(Card("Select to speak",
                 Help("Double-click the ring, then drag a box around any text on the screen (or tap a word) to hear it. Esc closes."),
-                _editRow, _voiceRow, _voiceHint, speedRow));
+                _editRow, _voiceRow, _voiceHint, speedRow, _badges, _badgesHint));
             _layout.Controls.Add(Card("Help",
                 Help("The log has no key and none of your words."), Row(_copyLog)));
             _layout.RowCount = _layout.Controls.Count;
@@ -235,8 +238,22 @@ namespace Rapcha.Win
             _editRow.Controls.Add(_resetVoice);
             _lockNote.AutoSize = true; _lockNote.ForeColor = Theme.Muted; _lockNote.BackColor = Color.White; _lockNote.Margin = new Padding(8, 8, 0, 0);
             _editRow.Controls.Add(_lockNote);
+            _badges.Checked = VoiceSettings.ShowBadges;
+            _badges.Font = new Font(Theme.Sans, 10f);
+            _badges.ForeColor = Theme.Ink;
+            _badges.BackColor = Color.White;
+            _badges.Margin = new Padding(0, 6, 0, 0);
+            _badges.CheckedChanged += (s, e) => { if (!_loadingVoices) _pendingBadges = _badges.Checked; };   // saved on Done
+            _badgesHint.Text = "Small numbers 1, 2, 3 beside each outlined paragraph, in reading order. Reading and Previous / Next work the same either way.";
+            _badgesHint.AutoSize = true;
+            _badgesHint.MaximumSize = new Size(700, 0);
+            _badgesHint.ForeColor = Theme.Muted;
+            _badgesHint.BackColor = Color.White;
+            _badgesHint.Margin = new Padding(20, 0, 0, 6);
             ApplyVoiceLock();
         }
+
+        private readonly Label _badgesHint = new Label();
 
         /// <summary>Fills the list (all OneCore + SAPI voices) and selects the saved one, or the Windows default.</summary>
         internal void LoadVoices()
@@ -268,7 +285,7 @@ namespace Rapcha.Win
         internal TrackBar SpeedSlider => _speed;
         /// <summary>Asks before Reset (the self-test answers for the user).</summary>
         internal static Func<bool> ConfirmReset = () =>
-            MessageBox.Show("Reset select to speak to its defaults?\n\nVoice: Windows default\nSpeed: 1.0×\n\nOther settings are not changed.",
+            MessageBox.Show("Reset select to speak to its defaults?\n\nVoice: Windows default\nSpeed: 1.0×\nNumber badges: on\n\nOther settings are not changed.",
                             "Rapcha", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
 
         private void ApplyVoiceLock()
@@ -277,9 +294,10 @@ namespace Rapcha.Win
             _voice.Enabled = on && _haveVoices;
             _previewVoice.Enabled = on && _haveVoices;
             _speed.Enabled = on;
+            _badges.Enabled = on;
             _editVoice.Text = _voiceLocked ? "Edit" : "Done";
             _editVoice.Primary = !_voiceLocked;
-            _lockNote.Text = _voiceLocked ? "Locked. Press Edit to change the voice or speed." : "Editing: press Done to save.";
+            _lockNote.Text = _voiceLocked ? "Locked. Press Edit to change the voice, speed or number badges." : "Editing: press Done to save.";
             _editVoice.Invalidate();
         }
 
@@ -288,6 +306,7 @@ namespace Rapcha.Win
             _voiceLocked = false;
             _pendingVoiceId = (_voice.SelectedItem as VoiceEntry)?.Id;
             _pendingSpeed = _speed.Value / 10.0;
+            _pendingBadges = _badges.Checked;
             ApplyVoiceLock();
             AppStorage.Log("Settings: select to speak unlocked for editing");
         }
@@ -297,9 +316,10 @@ namespace Rapcha.Win
             if (_pendingVoiceId != null) Voices.SavedId = _pendingVoiceId;
             VoiceSettings.Override = null;
             VoiceSettings.Speed = _pendingSpeed;
+            VoiceSettings.ShowBadges = _pendingBadges;
             var v = _voice.SelectedItem as VoiceEntry;
             AppStorage.Log("Settings: select to speak saved: voice " + (v != null ? v.Label + (v.Desktop ? " [SAPI]" : " [OneCore]") : "default") +
-                           " speed " + VoiceSettings.Speed.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                           " speed " + VoiceSettings.Speed.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " badges=" + (VoiceSettings.ShowBadges ? "on" : "off"));
             _voiceLocked = true;
             ApplyVoiceLock();
         }
@@ -313,8 +333,10 @@ namespace Rapcha.Win
             VoiceSettings.Override = null;
             VoiceSettings.Speed = VoiceSettings.DefaultSpeed;
             _loadingVoices = true;
-            try { _speed.Value = (int)Math.Round(VoiceSettings.DefaultSpeed * 10); } finally { _loadingVoices = false; }
+            VoiceSettings.ShowBadges = VoiceSettings.DefaultShowBadges;
+            try { _speed.Value = (int)Math.Round(VoiceSettings.DefaultSpeed * 10); _badges.Checked = VoiceSettings.DefaultShowBadges; } finally { _loadingVoices = false; }
             _pendingSpeed = VoiceSettings.DefaultSpeed;
+            _pendingBadges = VoiceSettings.DefaultShowBadges;
             LoadVoices();
             _pendingVoiceId = null;
             _voiceLocked = true;

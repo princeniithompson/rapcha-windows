@@ -122,6 +122,27 @@ namespace Rapcha.Win
             _ = StartAt(target);
         }
 
+        public void JumpTo(int word)
+        {
+            if (Plan == null || Plan.IsEmpty) return;
+            Skip(Math.Max(0, Math.Min(Plan.Words.Count - 1, word)) - CurrentWord);
+        }
+
+        private ReadingPlan _aheadPlan;
+        private int _aheadWord = -1;
+        private Task<Chunk> _aheadTask;
+
+        /// <summary>Synthesizes the first piece from a word now (the next segment), kept until that jump or a new reading.</summary>
+        public void PrepareAt(int word)
+        {
+            if (Plan == null || Plan.IsEmpty || word < 0 || word >= Plan.Words.Count) return;
+            if (_aheadPlan == Plan && _aheadWord == word && _aheadTask != null) return;
+            _aheadPlan = Plan;
+            _aheadWord = word;
+            _aheadTask = Synthesize(Plan, word, ChunkEnd(Plan, word, FirstChunkWords));
+            _aheadTask.ContinueWith(t => { var x = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+        }
+
         public void Stop()
         {
             _gen++;
@@ -216,6 +237,8 @@ namespace Rapcha.Win
 
         private async Task StartAt(int word, Task<Chunk> ready = null)
         {
+            if (ready == null && _aheadTask != null && _aheadPlan == Plan && _aheadWord == word && !_aheadTask.IsFaulted) ready = _aheadTask;   // Next: made ahead
+            if (_aheadPlan != Plan || _aheadWord == word) { _aheadTask = null; _aheadPlan = null; _aheadWord = -1; }
             int gen = ++_gen;
             StopPlayer();
             _next = null;

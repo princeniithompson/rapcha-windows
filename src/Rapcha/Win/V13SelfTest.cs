@@ -520,7 +520,7 @@ namespace Rapcha.Win
         {
             int s = b.Width;
             var corner = b.GetPixel(0, 0);
-            int inset = Math.Max(1, (int)Math.Round(s * 0.09));
+            int inset = Math.Max(1, (int)Math.Round(s * 0.055));   // v15: the ring fills ~84% of the tile
             var edges = new[] { b.GetPixel(inset, s / 2), b.GetPixel(s / 2, inset), b.GetPixel(s - 1 - inset, s / 2), b.GetPixel(s / 2, s - 1 - inset) };
             bool white = edges.All(p => p.A > 220 && p.R > 225 && p.G > 225 && p.B > 225);
             bool red = false;
