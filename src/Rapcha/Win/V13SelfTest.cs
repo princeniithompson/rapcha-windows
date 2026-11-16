@@ -457,19 +457,19 @@ namespace Rapcha.Win
             {
                 sg.Clear(Color.FromArgb(0x20, 0x20, 0x20));
                 int x = 20;
-                foreach (int s in sizes)
+                var entries = IconEntries();
+                Log("icon entries=" + string.Join(",", entries.Select(e => e.Width)));
+                all &= sizes.All(sz => entries.Any(e => e.Width == sz));
+                foreach (var bmp in entries.OrderBy(e => e.Width))
                 {
-                    using (var st = typeof(Program).Assembly.GetManifestResourceStream("Rapcha.rapcha.ico"))
-                    using (var ico = new Icon(st, s, s))
-                    using (var bmp = ico.ToBitmap())
-                    {
-                        bool ok = WhiteBackground(bmp, out string why) && bmp.Width == s;
-                        Log("icon " + s + "px got=" + bmp.Width + " white_rounded=" + ok + " " + why);
-                        all &= ok;
-                        if (s == 256 || s == 48 || s == 32 || s == 16) bmp.Save(Path.Combine(_out, "icon-" + s + ".png"), ImageFormat.Png);
-                        sg.DrawImageUnscaled(bmp, x, 300 - s - 20);
-                        x += s + 20;
-                    }
+                    int s = bmp.Width;
+                    bool ok = WhiteBackground(bmp, out string why);
+                    Log("icon " + s + "px white_rounded=" + ok + " " + why);
+                    all &= ok;
+                    if (s == 256 || s == 48 || s == 32 || s == 16) bmp.Save(Path.Combine(_out, "icon-" + s + ".png"), ImageFormat.Png);
+                    sg.DrawImageUnscaled(bmp, x, 300 - s - 20);
+                    x += s + 20;
+                    bmp.Dispose();
                 }
                 sheet.Save(Path.Combine(_out, "icon-sizes-on-dark.png"), ImageFormat.Png);
             }
@@ -487,6 +487,29 @@ namespace Rapcha.Win
             bool app = Program.AppIcon != null && WhiteBackground(Program.AppIcon.ToBitmap(), out _);
             Log("window icon white_rounded=" + app);
             return all && app ? 0 : 67;
+        }
+
+        /// <summary>Every image in the embedded rapcha.ico (PNG-compressed entries such as 256 px decoded directly).</summary>
+        private static List<Bitmap> IconEntries()
+        {
+            byte[] ico;
+            using (var st = typeof(Program).Assembly.GetManifestResourceStream("Rapcha.rapcha.ico"))
+            using (var ms = new MemoryStream()) { st.CopyTo(ms); ico = ms.ToArray(); }
+            var list = new List<Bitmap>();
+            int count = BitConverter.ToUInt16(ico, 4);
+            for (int i = 0; i < count; i++)
+            {
+                int e = 6 + 16 * i;
+                int w = ico[e] == 0 ? 256 : ico[e];
+                int size = BitConverter.ToInt32(ico, e + 8), offset = BitConverter.ToInt32(ico, e + 12);
+                bool png = ico[offset] == 0x89 && ico[offset + 1] == 0x50;
+                if (png)
+                    using (var ms = new MemoryStream(ico, offset, size)) list.Add(new Bitmap(Image.FromStream(ms)));
+                else
+                    using (var st = new MemoryStream(ico))
+                    using (var icon = new Icon(st, w, w)) list.Add(icon.ToBitmap());
+            }
+            return list;
         }
 
         /// <summary>Corners transparent (rounded), a white band just inside the left/top edge, the red ring in the middle area.</summary>
