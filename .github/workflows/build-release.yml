@@ -59,7 +59,7 @@ jobs:
           if (Test-Path $piper) { throw "The old Piper folder was not deleted" }
           if ($code -ne 0) { throw "Overlay self-test failed ($code)" }
 
-      - name: Ring self-test (clickable hole, resting, wake tap, spinner, ring + bubble move together, field outline, no-field note)
+      - name: Ring self-test (clickable hole, resting, wake tap, spinner, ring + bubble move together, four-edge docking, field outline, no-field note)
         shell: pwsh
         run: |
           $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
@@ -74,9 +74,34 @@ jobs:
           $code = $p.ExitCode
           if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ring|Ring |Unhandled|Exception" | Select-Object -Last 30 }
           Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
-          "Ring self-test exit code: $code (0 ok, 11 hole, 12 resting, 13 wake tap, 14 spinner, 15 move together, 16 field outline, 17 no-field note)"
+          "Ring self-test exit code: $code (0 ok, 11 hole, 12 resting, 13 wake tap, 14 spinner, 15 move together, 16 field outline, 17 no-field note, 18 four-edge docking)"
           "## Ring self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "Ring self-test failed ($code)" }
+
+      - name: Main window self-test (history + word count, Home, Copy, Delete, Vocabulary, Glow colour, rounded outline, screenshots)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-main "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force; throw "Main window self-test hung" }
+          $code = $p.ExitCode
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest main|History|Vocabulary|Glow colour|Unhandled|Exception" | Select-Object -Last 30 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          "Main window self-test exit code: $code (0 ok, 21 history, 22 Home page, 23 copy, 24 delete, 25 vocabulary, 26 glow colour saved, 27 outline colour/shape, 28 close/dispose)"
+          "## Main window self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "Main window self-test failed ($code)" }
+
+      - name: Upload main window screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapcha-screenshots
+          path: ${{ runner.temp }}/rapcha-shots/*.png
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Downloaded-file mark is removed on first run
         shell: pwsh
@@ -114,11 +139,32 @@ jobs:
           Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
           if ($code -ne 0) { throw "Paste self-test did not confirm the paste ($code)" }
 
-      - name: Smoke test (start, single instance, update hand-off)
+      - name: Smoke test (start, main window on every launch, single instance, update hand-off)
         shell: pwsh
         run: |
           $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
           $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          Add-Type -Namespace W -Name U -MemberDefinition @'
+          [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
+          [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+          [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+          [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, int m, IntPtr w, IntPtr l);
+          '@
+          function MainWindowOf([int]$procId, [int]$waitMs = 8000) {
+            $until = (Get-Date).AddMilliseconds($waitMs)
+            do {
+              $h = [W.U]::FindWindow($null, "Rapcha for Windows")
+              if ($h -ne [IntPtr]::Zero -and [W.U]::IsWindowVisible($h)) { $o = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$o); if ($o -eq $procId) { return $h } }
+              Start-Sleep -Milliseconds 250
+            } while ((Get-Date) -lt $until)
+            return [IntPtr]::Zero
+          }
+          function CloseMainWindow() {
+            $h = [W.U]::FindWindow($null, "Rapcha for Windows")
+            if ($h -ne [IntPtr]::Zero) { [void][W.U]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+            Start-Sleep -Seconds 1
+            if ([W.U]::FindWindow($null, "Rapcha for Windows") -ne [IntPtr]::Zero) { throw "The main window did not close" }
+          }
           try {
             # 1. An old v1 is running (v1 does not listen for the quit signal): the new build must close it.
             $oldDir = Join-Path $env:RUNNER_TEMP "v1"; New-Item -ItemType Directory -Force $oldDir | Out-Null
@@ -129,42 +175,59 @@ jobs:
             if ($v1.HasExited) { throw "v1 did not start" }
             $p1 = Start-Process -FilePath $exe -PassThru
             if (-not $v1.WaitForExit(15000)) { throw "The new build did not replace the running v1" }
-            Start-Sleep -Seconds 6
+            Start-Sleep -Seconds 4
             if ($p1.HasExited) { throw "Rapcha.exe exited early with code $($p1.ExitCode)" }
+            if ((MainWindowOf $p1.Id) -eq [IntPtr]::Zero) { throw "A fresh manual start did not show the main window" }
+            "1. fresh start: main window shown"
             "Working set: {0:N1} MB" -f ((Get-Process -Id $p1.Id).WorkingSet64 / 1MB)
+            CloseMainWindow
+            if ($p1.HasExited) { throw "Closing the main window quit Rapcha (the ring must keep running)" }
+            "   main window closed, Rapcha still running. Working set: {0:N1} MB" -f ((Get-Process -Id $p1.Id).WorkingSet64 / 1MB)
 
-            # 2. The same exe again: exits quietly (no message box) and leaves the first one running.
+            # 2. The same exe again: exits quietly and the running copy shows its main window.
             $p2 = Start-Process -FilePath $exe -PassThru
             if (-not $p2.WaitForExit(10000)) { throw "Second launch of the same build did not exit" }
             if ($p1.HasExited) { throw "First instance died when the same build was launched again" }
+            if ((MainWindowOf $p1.Id) -eq [IntPtr]::Zero) { throw "A second launch did not show the main window" }
+            "2. second launch, same path: main window shown by the running copy"
+            CloseMainWindow
 
-            # 2b. The Desktop shortcut while it runs: the running copy opens Settings, nothing else starts.
+            # 2b. The Desktop shortcut while it runs: the running copy shows the main window, nothing else starts.
             $desk0 = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "Rapcha.lnk"
             $shows0 = @(Get-Content $log | Select-String "Show requested by a second launch").Count
             Start-Process $desk0
-            Start-Sleep -Seconds 5
+            $h = MainWindowOf $p1.Id
             $shows1 = @(Get-Content $log | Select-String "Show requested by a second launch").Count
             $count = @(Get-Process Rapcha -ErrorAction SilentlyContinue).Count
-            $titles = (Get-Process Rapcha -ErrorAction SilentlyContinue | ForEach-Object { $_.MainWindowTitle }) -join ", "
-            "Shortcut launch: show_requests $shows0 -> $shows1, Rapcha processes=$count, windows=[$titles]"
-            if ($shows1 -le $shows0) { throw "Launching the shortcut did not open Settings in the running copy" }
+            "2b. shortcut: show_requests $shows0 -> $shows1, Rapcha processes=$count, main_window=$($h -ne [IntPtr]::Zero)"
+            if ($h -eq [IntPtr]::Zero) { throw "Launching the shortcut did not show the main window" }
             if ($count -ne 1) { throw "Launching the shortcut left $count Rapcha processes" }
             if ($p1.HasExited) { throw "First instance died when the shortcut was launched" }
+            CloseMainWindow
 
-            # 3. A copy elsewhere counts as a different build: the running one quits cleanly via the signal.
-            $newDir = Join-Path $env:RUNNER_TEMP "moved"; New-Item -ItemType Directory -Force $newDir | Out-Null
-            Copy-Item $exe (Join-Path $newDir "Rapcha.exe")
-            $p3 = Start-Process -FilePath (Join-Path $newDir "Rapcha.exe") -PassThru
+            # 3. A downloaded copy elsewhere ("Rapcha (4).exe"): it takes over and shows the main window.
+            $newDir = Join-Path $env:RUNNER_TEMP "Downloads"; New-Item -ItemType Directory -Force $newDir | Out-Null
+            $moved = Join-Path $newDir "Rapcha (4).exe"
+            Copy-Item $exe $moved
+            $p3 = Start-Process -FilePath $moved -PassThru
             if (-not $p1.WaitForExit(15000)) { throw "Old instance did not quit for the new one" }
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 3
             if ($p3.HasExited) { throw "New instance exited after taking over (code $($p3.ExitCode))" }
+            if ((MainWindowOf $p3.Id) -eq [IntPtr]::Zero) { throw "Launching a copy from another path did not end with the main window visible" }
+            "3. 'Rapcha (4).exe' from another folder: took over and shows the main window"
+            CloseMainWindow
 
             $desk = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "Rapcha.lnk"
             $start = Join-Path ([Environment]::GetFolderPath('Programs')) "Rapcha.lnk"
             if (-not (Test-Path $desk) -or -not (Test-Path $start)) { throw "Shortcuts were not created" }
             $target = (New-Object -ComObject WScript.Shell).CreateShortcut($desk).TargetPath
             "Desktop shortcut -> $target"
-            if ($target -ne (Join-Path $newDir "Rapcha.exe")) { throw "Shortcut was not refreshed after the exe moved" }
+            if ($target -ne $moved) { throw "Shortcut was not refreshed after the exe moved" }
+
+            # 4. The (refreshed) Start Menu shortcut while the moved copy runs: main window again.
+            Start-Process $start
+            if ((MainWindowOf $p3.Id) -eq [IntPtr]::Zero) { throw "The Start Menu shortcut did not show the main window" }
+            "4. Start Menu shortcut: main window shown by the running copy"
             Stop-Process -Id $p3.Id -Force
           }
           finally {
