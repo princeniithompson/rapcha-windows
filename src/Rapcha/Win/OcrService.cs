@@ -238,7 +238,7 @@ namespace Rapcha.Win
         }
 
         /// <summary>
-        /// The rows of text found so far (lines side by side and close together form one row), each read again on
+        /// The rows of text found so far (pieces of text on the same baseline form one row, whatever the gap between them), each read again on
         /// its own: the row's box with a little margin, enlarged, cut into slices narrower than the row. Only words
         /// centred inside the row are kept (a strip also catches the edges of the rows above and below).
         /// </summary>
@@ -256,8 +256,7 @@ namespace Rapcha.Win
                 {
                     var r = rows[i];
                     double ov = Math.Min(r.Bottom, l.Box.Bottom) - Math.Max(r.Y, l.Box.Y);
-                    double gap = Math.Max(l.Box.X - r.Right, r.X - l.Box.Right);
-                    if (ov >= 0.6 * Math.Min(r.H, l.Box.H) && Math.Max(r.H, l.Box.H) <= 1.6 * Math.Min(r.H, l.Box.H) && gap < 3 * l.Box.H) { hit = i; break; }
+                    if (ov >= 0.6 * Math.Min(r.H, l.Box.H) && Math.Max(r.H, l.Box.H) <= 1.6 * Math.Min(r.H, l.Box.H)) { hit = i; break; }   // any gap: words the screen passes missed between two pieces of a row are read too
                 }
                 if (hit >= 0) rows[hit] = rows[hit].Union(l.Box); else rows.Add(l.Box);
             }
