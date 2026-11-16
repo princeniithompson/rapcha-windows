@@ -57,6 +57,8 @@ namespace Rapcha.Core
 
         /// <summary>Raised once, on a thread-pool thread.</summary>
         public event Action<LiveError> Failed;
+        /// <summary>Gemini says this connection ends soon (Live API GoAway): finish now and keep the words.</summary>
+        public event Action GoAway;
         public event Action<string> Log;
 
         /// <summary>Live words for the Words bubble (finalized + interim preview), on a thread-pool thread.</summary>
@@ -339,6 +341,11 @@ namespace Rapcha.Core
                 if (_turn.ActivityEnded) _finalTcs.TrySetResult(SettleLocked(_turn.LastInterimText, true, _vocabulary));
                 RaiseFailed(new LiveError(keyError ? LiveErrorKind.BadKey : LiveErrorKind.Server, desc));
                 return;
+            }
+            if (m.GoAway)
+            {
+                LogLine("goAway received (the connection will end soon)");
+                try { GoAway?.Invoke(); } catch { }
             }
             if (!m.HasServerContent) return;
             string preview;

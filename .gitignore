@@ -16,3 +16,4 @@ artifacts/
 .env.*
 apikey.dat
 secrets.*
+src/Rapcha/Assets/engine/

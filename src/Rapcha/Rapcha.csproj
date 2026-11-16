@@ -44,6 +44,9 @@
   <ItemGroup>
     <EmbeddedResource Include="Assets\lifebuoy.png" LogicalName="Rapcha.lifebuoy.png" />
     <EmbeddedResource Include="Assets\rapcha.ico" LogicalName="Rapcha.rapcha.ico" />
+    <!-- The whisper.cpp engine (two 32-bit builds of native/rapcha-whisper.dll, gzipped). The release workflow builds
+         them into Assets\engine before this project; a local build without them simply has no Whisper inside. -->
+    <EmbeddedResource Include="Assets\engine\*.dll.gz" LogicalName="Rapcha.engine.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

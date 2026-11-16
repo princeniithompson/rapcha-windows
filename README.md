@@ -49,6 +49,24 @@ In **Settings → Select to speak** the voice, Preview, speed and **Show number 
 
 Text is found with the offline text recognition built into Windows, and read with the built-in Windows voice. Nothing is downloaded and nothing leaves your PC. (Older versions downloaded a Piper voice to `%AppData%\Rapcha\piper`; Rapcha now deletes it to free the space.)
 
+## Offline voice typing
+
+When there is no internet, or it drops while you talk, Rapcha keeps typing with speech that runs on your laptop and keeps every word already captured. A small **Offline** tag shows in the words box, and the next dictation goes back to Gemini as soon as you are online. You can turn this off in **Settings → Offline voice typing → Offline fallback** (on by default).
+
+At startup Rapcha checks the laptop's memory (also cores and free disk) and picks a level:
+
+- **Low** (under 6 GB): built-in Windows speech, up to 5 minutes at a time. *Download Whisper model* is shown but greyed out: "Your laptop's memory is too low for this. Rapcha will use built-in Windows speech instead."
+- **Medium** (6 to 8 GB): you can download Whisper Tiny (74 MB), up to 2 minutes at a time.
+- **Strong** (over 8 GB): Whisper Base (141 MB), or Small (465 MB) for the best accuracy, up to 5 minutes at a time.
+
+Built-in Windows speech is the desktop speech recogniser that comes with Windows 10 and 11 (System.Speech dictation). It runs fully offline and, being Microsoft's own code, also works in Windows S mode. If your laptop doesn't have it, Settings shows **Get Windows speech**, which opens Windows Speech settings so you can download the speech pack for your language.
+
+Whisper models come from the official whisper.cpp models on Hugging Face (`ggerganov/whisper.cpp`). The download shows progress and can be cancelled, is checked against the published SHA-256, and is kept in `%AppData%\Rapcha\models` (Delete removes it). The model is loaded only while you talk and freed right after. Audio is turned into text in pieces of about 30 seconds while you keep talking, so memory stays flat; if free memory runs low, Rapcha stops and keeps your words. The whisper.cpp engine is inside Rapcha.exe (a 32-bit DLL written to `%AppData%\Rapcha\engine` and loaded on first use; no other program is started). Windows in S mode refuses unsigned DLLs; then Rapcha says "Whisper can't run in Windows S mode; using built-in Windows speech".
+
+Offline, your words get a light clean-up without any model: capitals at the start of sentences, a full stop at the end, "um" and "uh" removed, and your Custom Vocabulary spelled your way. Online, Gemini's smart polish is unchanged. (An optional small polishing model for Strong laptops is planned; it is shown as "coming later".)
+
+**Recording timer.** A small m:ss timer sits in the words box's bottom row, between Cancel and the keyboard icon, in a light shade of your glow colour. In the last 20 seconds it gently counts down ("0:19 left") and then Rapcha stops by itself and keeps the text. Limits: online 9:30 (Google's Live API keeps one connection for about 10 minutes, and Rapcha needs a few seconds after you stop to finish the text: https://ai.google.dev/gemini-api/docs/live-session), built-in speech 5:00, Whisper 2:00 (Medium) or 5:00 (Strong).
+
 ## For developers
 
 C# WinForms on .NET Framework 4.8 (already part of Windows 10 and 11), one small portable `Rapcha.exe` with no extra DLLs.

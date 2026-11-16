@@ -19,6 +19,10 @@ namespace Rapcha.Win
         public const string TooQuiet = "I couldn't hear you. Speak closer to the microphone, or choose another one in Settings.";
         public const string GeminiNothing = "Gemini returned nothing for your speech. Try again and speak a little longer.";
         public const string GeminiSlow = "Gemini didn't answer in time. Check your internet and try again.";
+        public const string TimeLimit = "Time limit reached, so Rapcha stopped. Your words are kept.";
+        public const string LowMemory = "Stopped early because your laptop is low on memory. Your words are kept.";
+        public const string OfflineOff = "No internet connection. Turn on Offline fallback in Settings to keep typing without internet.";
+        public const string OfflineNoSpeech = "You're offline and this laptop has no Windows speech yet. In Settings, press Get Windows speech.";
 
         public static string For(LiveError e)
         {

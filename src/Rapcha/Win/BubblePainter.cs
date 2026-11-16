@@ -19,6 +19,11 @@ namespace Rapcha.Win
         public bool MicHint;
         public bool? Field;
         public Rectangle CancelRect, CompleteRect, FixRect, IconRect;
+        /// <summary>The small recording timer ("1:05", then "0:19 left") and the "Offline" tag in the bottom row's gaps.</summary>
+        public string Timer = "";
+        public bool TimerCountdown;
+        public bool Offline;
+        public Rectangle TimerRect, OfflineRect, TextRect;
         public int LineCount { get; private set; }       // wrapped lines of the current text
         public int VisibleLines { get; private set; }    // lines fully visible in the text area
         public float ButtonPx { get; private set; }
@@ -105,8 +110,9 @@ namespace Rapcha.Win
                     g.DrawPath(border, path);
             }
 
-            CancelRect = CompleteRect = FixRect = IconRect = Rectangle.Empty;
+            CancelRect = CompleteRect = FixRect = IconRect = TimerRect = OfflineRect = Rectangle.Empty;
             var textRect = new Rectangle(L.PadX, L.TextTop, L.Width - L.PadX * 2, L.TextHeight);
+            TextRect = textRect;
             using (var font = new Font(Theme.Sans, L.TextPx, FontStyle.Regular, GraphicsUnit.Pixel))
             using (var bold = new Font(Theme.Sans, L.TextPx, FontStyle.Bold, GraphicsUnit.Pixel))
             {
@@ -276,6 +282,55 @@ namespace Rapcha.Win
                     using (var sf = new StringFormat(Typo) { LineAlignment = StringAlignment.Center })
                         g.DrawString(label, f, b, new RectangleF(x0 + S(4), y, IconRect.X - x0, h), sf);
                 }
+            }
+            DrawStatus(g, buttons, x0, x1, y, h, px);
+        }
+
+        /// <summary>
+        /// The timer sits in the gap between Cancel and the keyboard icon, the "Offline" tag in the gap between the
+        /// icon and Complete: small, muted, in the glow colour, never over the words or a button. Either one hides
+        /// itself if the gap is too narrow (very large text).
+        /// </summary>
+        private void DrawStatus(Graphics g, bool buttons, int x0, int x1, int y, int h, float px)
+        {
+            int gap = S(6);
+            int leftEdge = buttons ? CancelRect.Right + gap : -1;      // no buttons: the left gap holds "Polishing…"
+            int leftEnd = IconRect.X - gap;
+            int rightStart = IconRect.Right + gap;
+            int rightEnd = (buttons ? CompleteRect.X : x1) - gap;
+            float small = Math.Max(7f, px * 0.86f);
+            if (buttons && !string.IsNullOrEmpty(Timer) && leftEdge > 0)
+            {
+                for (float sz = small; sz >= 6.5f && TimerRect.IsEmpty; sz -= 0.5f)
+                    using (var f = new Font(Theme.Sans, sz, TimerCountdown ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel))
+                    {
+                        var size = Size.Ceiling(g.MeasureString(Timer, f, PointF.Empty, Typo));
+                        if (size.Width > leftEnd - leftEdge) continue;
+                        // centred in its gap, on the row's middle line
+                        int x = leftEdge + (leftEnd - leftEdge - size.Width) / 2;
+                        TimerRect = new Rectangle(x, y + (h - size.Height) / 2, size.Width, size.Height);
+                        var c = TimerCountdown ? Accent.Lighter(0.35) : Color.FromArgb(175, Accent.Mix(Color.FromArgb(190, 196, 186), Accent.Color, 0.35));
+                        using (var b = new SolidBrush(c)) g.DrawString(Timer, f, b, TimerRect.X, TimerRect.Y, Typo);
+                    }
+            }
+            if (Offline)
+            {
+                const string tag = "Offline";
+                for (float sz = small; sz >= 6.5f && OfflineRect.IsEmpty; sz -= 0.5f)
+                    using (var f = new Font(Theme.Sans, sz, FontStyle.Regular, GraphicsUnit.Pixel))
+                    {
+                        var size = Size.Ceiling(g.MeasureString(tag, f, PointF.Empty, Typo));
+                        int w = size.Width + S(12), th = size.Height + S(3);
+                        if (w > rightEnd - rightStart) continue;
+                        int x = rightStart + (rightEnd - rightStart - w) / 2;
+                        OfflineRect = new Rectangle(x, y + (h - th) / 2, w, th);
+                        using (var path = Theme.Round(OfflineRect, th / 2f))
+                        using (var pen = new Pen(Color.FromArgb(120, Accent.Lighter(0.3)), 1f))
+                            g.DrawPath(pen, path);
+                        using (var b = new SolidBrush(Color.FromArgb(200, Accent.Mix(Color.FromArgb(200, 205, 196), Accent.Color, 0.3))))
+                        using (var sf = new StringFormat(Typo) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            g.DrawString(tag, f, b, OfflineRect, sf);
+                    }
             }
         }
 

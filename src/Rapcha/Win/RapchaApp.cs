@@ -13,7 +13,6 @@ namespace Rapcha.Win
         private enum Phase { Idle, Recording, Finishing }
 
         private const int CompleteTailMs = 180;          // FloatingDictationSessionManager.COMPLETE_TAIL_MS
-        private const int MaxRecordingSeconds = 195;     // DictationPiecePlanner.FORCE_AFTER_MS (one piece per session)
         private const int MicHintAfterMs = 2000;
         private const int MicHintPeak = 120;             // peak sample below this = "near zero"
         private const int EscHotkeyId = 0x5241;
@@ -31,6 +30,14 @@ namespace Rapcha.Win
         private int _sessionNumber;
         private LiveSession _session;
         private WaveInRecorder _recorder;
+        // Offline voice typing (v16): the audio router, the offline engine when there is no internet, the limit.
+        private DictationRouter _router;
+        private IOfflineEngine _offline;
+        private SpeechEngine _engine = SpeechEngine.Gemini;
+        private int _maxSeconds = SessionCaps.GeminiSeconds;
+        private DateTime _lastMemCheck;
+        private string _offlinePreview = "";
+        private System.Collections.Generic.List<string> _vocab = new System.Collections.Generic.List<string>();
         private IntPtr _target;
         private DateTime _startedAt;
         private bool _gotPreview;
@@ -123,6 +130,16 @@ namespace Rapcha.Win
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
             Uia.WarmUp();
+            Connectivity.Hook();
+            Task.Run(() =>
+            {
+                var facts = DeviceProbe.Facts;
+                AppStorage.Log("Device: " + facts + " tier=" + DeviceTiers.Name(DeviceTiers.Classify(facts)) + " s_mode=" + DeviceProbe.IsSMode() +
+                               " offline_fallback=" + OfflineSettings.Fallback);
+                BuiltInSpeech.Refresh();
+                var model = WhisperModels.Choose(DeviceTiers.Classify(facts), OfflineSettings.ChosenModel);
+                if (model != null && ModelStore.IsInstalled(model)) WhisperNative.EnsureLoaded();   // the engine only; the model loads while you talk
+            });
             OcrService.WarmUp();                  // the first overlay's first look doesn't pay for starting the OCR engine
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
             // Select to speak keeps one primed voice for the app's lifetime, so no selection waits for an engine to start.
@@ -224,10 +241,22 @@ namespace Rapcha.Win
         {
             RecordingStarts++;
             var key = AppStorage.LoadApiKey();
-            if (LiveSession.IsPlaceholder(key))
+            bool hasKey = !LiveSession.IsPlaceholder(key);
+            bool online = Connectivity.LikelyOnline;
+            var choice = online ? new EngineChoice { Ok = true, Engine = SpeechEngine.Gemini } : EnginePolicy.ChooseOffline(OfflineEngines.Inputs(false));
+            if (online && !hasKey)
             {
                 ShowLabel(Messages.NoKey, 4000, true);
                 OpenSettings(Messages.NoKey);
+                return;
+            }
+            if (!choice.Ok)
+            {
+                // Offline with nothing to type with: say why (no internet and fallback off, or no Windows speech).
+                var msg = choice.Why == NoEngineReason.NoRecognizer ? Messages.OfflineNoSpeech : Messages.OfflineOff;
+                AppStorage.Log("Start: offline and no engine (" + choice.Why + ")");
+                ShowLabel(msg, 6000, true);
+                if (choice.Why == NoEngineReason.NoRecognizer) OpenSettings(msg);
                 return;
             }
 
@@ -235,21 +264,49 @@ namespace Rapcha.Win
             _main?.Settings.PauseMeter();
             _target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
             var vocab = AppStorage.LoadVocabulary();
+            _vocab = vocab;
             int gen = ++_generation;
             int number = ++_sessionNumber;
-            var session = new LiveSession(key, vocab, levels: SilenceLevels.Windows);
-            session.Log += line => AppStorage.Log("[s" + number + "] " + line);
-            session.Failed += err =>
+            LiveSession session = null;
+            IOfflineEngine offline = null;
+            DictationRouter router;
+            string note = "";
+            if (choice.Engine == SpeechEngine.Gemini)
             {
-                try { _ring.BeginInvoke(new Action(() => OnSessionFailed(gen, err))); } catch { }
-            };
-            session.Preview += words =>
+                session = new LiveSession(key, vocab, levels: SilenceLevels.Windows);
+                var s = session;
+                session.Log += line => AppStorage.Log("[s" + number + "] " + line);
+                session.Failed += err =>
+                {
+                    try { _ring.BeginInvoke(new Action(() => OnSessionFailed(gen, err))); } catch { }
+                };
+                session.Preview += words =>
+                {
+                    try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording && _session == s) { _gotPreview = true; _router?.OnOnlineWords(words); _bubble.SetWords(words); } })); } catch { }
+                };
+                session.GoAway += () =>
+                {
+                    try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording && _session == s) { AppStorage.Log("[s" + number + "] finishing early: Gemini goAway"); _ = FinishAsync(); } })); } catch { }
+                };
+                router = new DictationRouter(chunk => s.SendAudio(chunk));
+            }
+            else
             {
-                try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording) { _gotPreview = true; _bubble.SetWords(words); } })); } catch { }
-            };
+                offline = OfflineEngines.Start(choice, vocab, out note);
+                if (offline == null)
+                {
+                    AppStorage.Log("[s" + number + "] offline engine could not start");
+                    ShowLabel(Messages.OfflineNoSpeech, 6000, true);
+                    OpenSettings(Messages.OfflineNoSpeech);
+                    _main?.Settings.ResumeMeter();
+                    return;
+                }
+                router = DictationRouter.Offline(offline.Feed);
+                HookOffline(offline, gen);
+            }
 
             var recorder = new WaveInRecorder(
-                chunk => session.SendAudio(chunk),
+                chunk => router.Feed(chunk),
                 level => _ring.Level = level);
             int device = WaveInRecorder.ResolveDevice(AppStorage.LoadMicDevice());
             var problem = recorder.Start(device, out var detail);
@@ -257,13 +314,19 @@ namespace Rapcha.Win
                            " attempts=[" + recorder.OpenAttempts + "] result=" + problem + (detail.Length > 0 ? " " + detail : ""));
             if (problem != MicProblem.None)
             {
-                session.Dispose();
+                session?.Dispose();
+                offline?.Dispose();
                 ShowLabel(SettingsPage.MicHelp(problem), 8000, true);
                 _main?.Settings.ResumeMeter();
                 return;
             }
 
             _session = session;
+            _offline = offline;
+            _router = router;
+            _engine = offline?.Kind ?? SpeechEngine.Gemini;
+            _maxSeconds = SessionCaps.MaxSeconds(_engine, DeviceProbe.Tier);
+            _offlinePreview = "";
             _recorder = recorder;
             _phase = Phase.Recording;
             _startedAt = DateTime.UtcNow;
@@ -272,11 +335,77 @@ namespace Rapcha.Win
             _label.HideNow();
             _ring.State = RingState.Recording;
             _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+            _bubble.Offline = offline != null;
+            _bubble.SetTimer(TimerText.For(0, _maxSeconds));
             _field.Start(_target);           // follows focus every 300 ms (and on UIA focus events) until the words are in
             _bubble.FieldValid = null;
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
             _watch.Start();
-            _ = session.ConnectAsync();
+            AppStorage.Log("[s" + number + "] engine=" + _engine + " tier=" + DeviceTiers.Name(DeviceProbe.Tier) + " max_s=" + _maxSeconds + (online ? "" : " (offline at start)"));
+            if (note.Length > 0) ShowLabel(note, 6000, true);
+            if (session != null)
+            {
+                _ = session.ConnectAsync();
+                _ = ProbeWhileConnectingAsync(gen, session);
+            }
+        }
+
+        /// <summary>Gets the offline engine's words into the Words box (after anything Gemini had already shown).</summary>
+        private void HookOffline(IOfflineEngine engine, int gen)
+        {
+            engine.Preview += raw =>
+            {
+                try
+                {
+                    _ring.BeginInvoke(new Action(() =>
+                    {
+                        if (gen != _generation || _offline != engine) return;
+                        _offlinePreview = EnginePolicy.Join(_router?.Captured, raw);
+                        if (_phase == Phase.Recording) { _gotPreview = true; _bubble.SetWords(_offlinePreview); }
+                    }));
+                }
+                catch { }
+            };
+        }
+
+        /// <summary>A quick internet check while Gemini connects: no internet means switch to offline right away.</summary>
+        private async Task ProbeWhileConnectingAsync(int gen, LiveSession session)
+        {
+            bool ok = await Connectivity.ProbeAsync();
+            if (ok || gen != _generation || _phase != Phase.Recording || _session != session || session.IsSetupComplete) return;
+            AppStorage.Log("[s" + _sessionNumber + "] internet check failed while connecting");
+            if (!OfflineSettings.Fallback || !TrySwitchToOffline(gen, "no_internet")) OnSessionFailed(gen, new LiveError(LiveErrorKind.NoInternet, "probe"));
+        }
+
+        /// <summary>
+        /// Gemini can't be reached (or the connection dropped part-way): keep recording with the offline engine and
+        /// keep every word captured so far. False when offline typing isn't possible here.
+        /// </summary>
+        private bool TrySwitchToOffline(int gen, string why)
+        {
+            if (gen != _generation || _phase != Phase.Recording || _offline != null || _router == null) return false;
+            Connectivity.MarkOffline();
+            var choice = EnginePolicy.ChooseOffline(OfflineEngines.Inputs(false));
+            if (!choice.Ok) { AppStorage.Log("[s" + _sessionNumber + "] offline switch not possible (" + choice.Why + ")"); return false; }
+            var engine = OfflineEngines.Start(choice, _vocab, out var note);
+            if (engine == null) { AppStorage.Log("[s" + _sessionNumber + "] offline switch: engine could not start"); return false; }
+            var session = _session;
+            string captured = session?.Turn.LastInterimText ?? "";
+            HookOffline(engine, gen);
+            _offline = engine;
+            _router.SwitchToOffline(engine.Feed, captured);
+            _engine = engine.Kind;
+            _session = null;
+            Task.Run(() => { try { session?.Dispose(); } catch { } });
+            int elapsed = (int)(DateTime.UtcNow - _startedAt).TotalSeconds;
+            _maxSeconds = SessionCaps.AfterSwitch(elapsed, SessionCaps.MaxSeconds(_engine, DeviceProbe.Tier));
+            _offlinePreview = _router.Captured;
+            _bubble.Offline = true;
+            if (_offlinePreview.Length > 0) _bubble.SetWords(_offlinePreview);
+            AppStorage.Log("[s" + _sessionNumber + "] offline: switched to " + _engine + " reason=" + why + " captured_chars=" + _router.Captured.Length +
+                           " at_s=" + elapsed + " max_s=" + _maxSeconds);
+            if (note.Length > 0) ShowLabel(note, 6000, true);
+            return true;
         }
 
         /// <summary>The field focused right now if it is a real text field; no field means clipboard only.</summary>
@@ -315,10 +444,21 @@ namespace Rapcha.Win
                 }
                 _bubble.MicHint = cantHear;
             }
-            if (elapsed.TotalSeconds >= MaxRecordingSeconds) _ = FinishAsync();
+            _bubble.SetTimer(TimerText.For(elapsed.TotalSeconds, _maxSeconds));
+            long free = -1;
+            if (_offline != null && (DateTime.UtcNow - _lastMemCheck).TotalMilliseconds >= 1000)
+            {
+                _lastMemCheck = DateTime.UtcNow;
+                free = DeviceProbe.FreeRamMb();
+            }
+            if (SessionCaps.ShouldStop(elapsed.TotalSeconds, _maxSeconds, _engine, free, out var why))
+            {
+                AppStorage.Log("[s" + _sessionNumber + "] stopping: " + why + " at_s=" + (int)elapsed.TotalSeconds + (free >= 0 ? " free_mb=" + free : ""));
+                _ = FinishAsync(why == "low_memory" ? Messages.LowMemory : Messages.TimeLimit);
+            }
         }
 
-        private async Task FinishAsync()
+        private async Task FinishAsync(string stopNote = null)
         {
             if (_phase != Phase.Recording) return;
             _phase = Phase.Finishing;
@@ -327,26 +467,38 @@ namespace Rapcha.Win
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
             _ring.State = RingState.Polishing;
-            _bubble.Set(WordsBubble.Mode.Polishing, _gotPreview ? _session.Turn.LastInterimText : "");
-
             var recorder = _recorder;
             var session = _session;
+            var offline = _offline;
+            var router = _router;
+            var vocab = _vocab;
+            _bubble.Set(WordsBubble.Mode.Polishing, offline != null ? _offlinePreview : _gotPreview && session != null ? session.Turn.LastInterimText : "");
             string text = "";
             try
             {
                 await Task.Run(() => recorder.StopAndJoin(CompleteTailMs));
-                text = await session.FinishAsync();
+                if (offline != null)
+                {
+                    // Offline: the engine's words get the light clean-up (capitals, full stops, no um/uh, your vocabulary).
+                    var raw = await offline.FinishAsync();
+                    text = EnginePolicy.Join(router?.Captured, RulePolish.Clean(raw, vocab));
+                }
+                else text = await session.FinishAsync();
             }
             catch (Exception ex)
             {
-                AppStorage.Log("[s" + number + "] finish failed: " + ex.GetType().Name + " " + ex.Message);
+                AppStorage.Log("[s" + number + "] finish failed: " + ex.GetType().Name);
             }
             finally
             {
-                session.Dispose();
+                session?.Dispose();
+                offline?.Dispose();   // Whisper frees its model here
             }
             text = (text ?? "").Trim();
-            LogSessionSummary(number, recorder, session, text);
+            if (offline != null)
+                AppStorage.Log("[s" + number + "] summary: offline " + offline.Summary + " captured_chars=" + (router?.Captured.Length ?? 0) +
+                               " bytes_captured=" + recorder.BytesCaptured + " result_chars=" + text.Length);
+            else LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
             var target = IntPtr.Zero;
             if (text.Length > 0)
@@ -358,7 +510,9 @@ namespace Rapcha.Win
 
             if (text.Length == 0)
             {
-                var reason = EmptyReason(recorder, session);
+                var reason = offline != null
+                    ? (recorder.BytesCaptured == 0 || recorder.LooksSilentlyBlocked ? Messages.NoSound : Messages.NothingHeard)
+                    : EmptyReason(recorder, session);
                 AppStorage.Log("[s" + number + "] empty result shown as: " + reason);
                 _bubble.Set(WordsBubble.Mode.Warning, reason);
                 await Task.Delay(reason == Messages.NothingHeard ? 2000 : 5000);
@@ -387,6 +541,7 @@ namespace Rapcha.Win
             }
             await Task.Delay(result == TextDelivery.Result.Typed ? 1300 : 2000);
             if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
+            if (stopNote != null && gen == _generation) ShowLabel(stopNote, 4000);
         }
 
         /// <summary>The real reason behind an empty result.</summary>
@@ -426,9 +581,10 @@ namespace Rapcha.Win
             AppStorage.Log("[s" + _sessionNumber + "] cancelled");
             var recorder = _recorder;
             var session = _session;
+            var offline = _offline;
             ResetToIdle();
             _bubble.Close2();
-            Task.Run(() => { try { recorder?.Abort(); } catch { } try { session?.Dispose(); } catch { } });
+            Task.Run(() => { try { recorder?.Abort(); } catch { } try { session?.Dispose(); } catch { } try { offline?.Dispose(); } catch { } });
             if (message != null) ShowLabel(message, 1200);
             else _label.HideNow();
         }
@@ -436,7 +592,10 @@ namespace Rapcha.Win
         private void OnSessionFailed(int gen, LiveError err)
         {
             if (gen != _generation || _phase == Phase.Idle) return;
+            if (_offline != null) return;   // already switched to offline: Gemini's late errors don't matter
             AppStorage.Log("[s" + _sessionNumber + "] session failed: " + err.Kind);
+            if (err.Kind == LiveErrorKind.NoInternet) Connectivity.MarkOffline();
+            if (_phase == Phase.Recording && EnginePolicy.SwitchesOffline(err.Kind) && OfflineSettings.Fallback && TrySwitchToOffline(gen, err.Kind.ToString())) return;
             _generation++;
             var recorder = _recorder;
             var session = _session;
@@ -456,6 +615,8 @@ namespace Rapcha.Win
             _phase = Phase.Idle;
             _session = null;
             _recorder = null;
+            _offline = null;
+            _router = null;
             _ring.State = RingState.Idle;
             _main?.Settings.ResumeMeter();
         }

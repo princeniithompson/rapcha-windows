@@ -58,6 +58,7 @@ namespace Rapcha.Win
             Place(ring, edge);
             _p.MicHint = false;
             _p.Field = null;
+            _p.Timer = ""; _p.TimerCountdown = false; _p.Offline = false;
             Set(Mode.Listening, "");
             if (!Visible) Show();
             KeepOnTop();
@@ -105,6 +106,21 @@ namespace Rapcha.Win
         {
             get => _p.MicHint;
             set { if (_p.MicHint != value) { _p.MicHint = value; Render(); } }
+        }
+
+        /// <summary>The small recording timer (empty = hidden); re-drawn only when the text changes.</summary>
+        public void SetTimer(TimerText t)
+        {
+            if (_p.Timer == (t.Text ?? "") && _p.TimerCountdown == t.Countdown) return;
+            _p.Timer = t.Text ?? ""; _p.TimerCountdown = t.Countdown;
+            Render();
+        }
+
+        /// <summary>The "Offline" tag: this dictation is typed by speech on this laptop.</summary>
+        public bool Offline
+        {
+            get => _p.Offline;
+            set { if (_p.Offline != value) { _p.Offline = value; Render(); } }
         }
 
         public void Close2() { _anim.Stop(); Hide(); }

@@ -46,6 +46,8 @@ namespace Rapcha.Win
         internal ComboBox VoicePicker => _voice;
         internal PillButton PreviewButton => _previewVoice;
         internal IReadAloud LastPreview => _preview;
+        private readonly OfflineCard _offlineCard = new OfflineCard();
+        internal OfflineCard Offline => _offlineCard;
         private readonly GlowPicker _glow = new GlowPicker();
         private readonly ShortcutsRows _shortcuts = new ShortcutsRows();
         internal ShortcutsRows Shortcuts => _shortcuts;
@@ -157,6 +159,7 @@ namespace Rapcha.Win
                 Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only."),
                 _key, _show, Row(_save), _status));
             _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_micSettings)));
+            _layout.Controls.Add(_offlineCard.Card);
             _layout.Controls.Add(Card("Glow colour",
                 Help("Applies to the ring glow, the words box, the text-box outline and the select-to-speak screen glow."),
                 _glow));
