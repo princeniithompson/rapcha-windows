@@ -27,7 +27,7 @@ Click **Complete** (or the ring again) and your words are typed where your curso
 
 If the bubble says **"I can't hear your microphone"**, click **Fix microphone** and turn on **Microphone access** and **Let desktop apps access your microphone**.
 In Settings you can choose your microphone and watch the level bar move when you talk.
-Click **Cancel**, right-click the ring, or press **Esc** while it is listening to cancel. Right-click it any other time for **Settings** and **Exit**.
+While you talk, the text box your words will go into glows (if there is none, the bubble says it will copy the words for you). When you stop, the ring spins until your words are in. Drag the ring or the Words bubble and they move together. Click **Cancel**, right-click the ring, or press **Esc** while it is listening to cancel. After 10 seconds with nothing to do the ring rests: smaller and dimmer at the edge. Tap it once to wake it. Right-click it any other time for **Settings** and **Exit**.
 
 ## Select to speak
 

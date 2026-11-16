@@ -14,6 +14,17 @@ namespace Rapcha.Win
         [STAThread]
         private static void Main(string[] args)
         {
+            Unblock.Self(); // drop the browser's "downloaded from the internet" mark so Windows stops warning on every start
+            if (args.Length >= 1 && args[0] == "--selftest-unblock") return;
+            if (args.Length >= 1 && args[0] == "--selftest-ring")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new RapchaApp(selfTestRing: true));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
             if (args.Length >= 2 && args[0] == "--selftest-ocr")
             {

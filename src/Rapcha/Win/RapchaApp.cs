@@ -40,10 +40,19 @@ namespace Rapcha.Win
         // Select to speak
         private readonly EdgeGlow _glow = new EdgeGlow();
         private readonly string _selfTestOcr;
+        private readonly bool _selfTestRing;
 
-        public RapchaApp(string selfTestOcr = null)
+        // Voice typing: the text field the words will go into.
+        private readonly FieldIndicator _field = new FieldIndicator();
+
+        // Ring and Words bubble move together while the bubble is up.
+        private Point _bubbleOffset;
+        private bool _bubbleFollows;
+
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false)
         {
             _selfTestOcr = selfTestOcr;
+            _selfTestRing = selfTestRing;
             _menu.Items.Add("Settings", null, (s, e) => OpenSettings(null));
             _menu.Items.Add("Exit", null, (s, e) => ExitApp());
 
@@ -56,7 +65,20 @@ namespace Rapcha.Win
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
             _ring.DoubleClicked += ToggleOverlay;
-            _ring.Moved += () => { if (_label.Visible) _label.HideNow(); };
+            _ring.Moved += OnRingMoved;
+            _ring.DragStarted += () =>
+            {
+                _bubbleFollows = _bubble.Visible;
+                if (_bubbleFollows) _bubbleOffset = new Point(_bubble.Area.X - _ring.RingBounds.X, _bubble.Area.Y - _ring.RingBounds.Y);
+            };
+            _ring.DragEnded += () =>
+            {
+                _bubbleFollows = false;
+                if (_bubble.Visible) _bubble.PlaceBeside(_ring.RingBounds, _ring.Edge);
+            };
+            _bubble.Dragged += (dx, dy) => _ring.MoveRingTo(_ring.RingBounds.X + dx, _ring.RingBounds.Y + dy);
+            _bubble.DragEnded += () => _ring.DockNow();
+            _ring.RestAllowed = () => _phase == Phase.Idle && _overlay == null && !_bubble.Visible && !_ring.IsDragging;
             _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
             _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
             _bubble.FixMicClicked += SettingsForm.OpenMicrophoneSettings;
@@ -66,20 +88,32 @@ namespace Rapcha.Win
             _ring.ShowDocked();
             InstanceManager.Listen(
                 onQuit: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Quit requested by a newer Rapcha"); ExitApp(); })); } catch { } },
-                onShow: () => { try { _ring.BeginInvoke(new Action(() => { _ring.ShowDocked(); OpenSettings(null); })); } catch { } });
+                onShow: () => { try { _ring.BeginInvoke(new Action(() => { AppStorage.Log("Show requested by a second launch: opening Settings"); _ring.ShowDocked(); OpenSettings(null); })); } catch { } });
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
+            if (_selfTestRing) { RunRingSelfTest(); return; }
             if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey()))
                 OpenSettings("Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.");
         }
 
+        private void OnRingMoved()
+        {
+            if (_label.Visible) _label.HideNow();
+            if (_ring.IsDragging && _bubbleFollows && _bubble.Visible)
+                _bubble.MoveTo(_ring.RingBounds.X + _bubbleOffset.X, _ring.RingBounds.Y + _bubbleOffset.Y);
+        }
+
         private int Dpi => (int)Math.Round(96.0 * _ring.RingSize / RingWindow.RingDip);
+
+        private int _ringClicks;
 
         private void OnRingClicked()
         {
+            _ringClicks++;
+            if (_selfTestRing) return; // the ring self-test only counts taps
             switch (_phase)
             {
                 case Phase.Idle: StartRecording(); break;
@@ -144,10 +178,31 @@ namespace Rapcha.Win
             _label.HideNow();
             _ring.State = RingState.Recording;
             _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+            _ = ShowTargetFieldAsync(gen, number);
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
             _watch.Start();
             _ = session.ConnectAsync();
         }
+
+        /// <summary>Outlines the text field the words will go into, or says there isn't one.</summary>
+        private async Task ShowTargetFieldAsync(int gen, int number)
+        {
+            FieldInfo info;
+            try { info = await _field.BeginAsync(_target); }
+            catch (Exception e) { AppStorage.Log("[s" + number + "] field lookup failed: " + e.GetType().Name); return; }
+            if (gen != _generation || _phase == Phase.Idle) return; // a newer session or the end already reset the outline
+            ApplyField(info);
+            AppStorage.Log("[s" + number + "] field: " + DescribeField(info));
+        }
+
+        private void ApplyField(FieldInfo info)
+        {
+            _bubble.Note = info.Editable ? "" : Messages.NoTextBox;
+        }
+
+        private string DescribeField(FieldInfo info) =>
+            "type=" + info.Type + " editable=" + info.Editable + " rule=" + info.Reason + " rect=" + info.Bounds.Width + "x" + info.Bounds.Height +
+            " outline=" + (_field.Active ? _field.Outline.Width + "x" + _field.Outline.Height : "none");
 
         private void OnWatchTick(object sender, EventArgs e)
         {
@@ -197,7 +252,7 @@ namespace Rapcha.Win
             text = (text ?? "").Trim();
             LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
-            ResetToIdle();
+            ResetToIdle(keepField: text.Length > 0);
 
             if (text.Length == 0)
             {
@@ -210,7 +265,14 @@ namespace Rapcha.Win
             }
 
             _bubble.Set(WordsBubble.Mode.Final, text);
-            var result = TextDelivery.Deliver(text, _target);
+            _ring.State = RingState.Polishing; // keep spinning until the words are in
+            TextDelivery.Result result;
+            try { result = TextDelivery.Deliver(text, _target); }
+            finally
+            {
+                if (_phase == Phase.Idle) _ring.State = RingState.Idle;
+                _field.Hide();
+            }
             AppStorage.Log("[s" + number + "] delivered: " + result);
             await Task.Delay(900);
             if (gen != _generation) return;
@@ -283,8 +345,9 @@ namespace Rapcha.Win
             if (err.Kind == LiveErrorKind.BadKey || err.Kind == LiveErrorKind.MissingKey) OpenSettings(msg);
         }
 
-        private void ResetToIdle()
+        private void ResetToIdle(bool keepField = false)
         {
+            if (!keepField) _field.Hide();
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
             _phase = Phase.Idle;
@@ -588,6 +651,206 @@ namespace Rapcha.Win
             go.Start();
         }
 
+        /// <summary>
+        /// CI hook (--selftest-ring): the ring's hole takes clicks, resting after the idle time (shortened to 1.5 s),
+        /// the first real click on a resting ring only wakes it, resting again, the spinner state, the ring and
+        /// Words bubble moving together (both ways) and docking to a side edge, the text field outline on an open
+        /// Notepad, and the "No text box" note on a window with no text field.
+        /// Exit: 0 ok, 11 hole not clickable, 12 resting, 13 wake, 14 spinner, 15 move together, 16 field, 17 no-field note, 1 timeout.
+        /// </summary>
+        private void RunRingSelfTest()
+        {
+            int stage = 0;
+            DateTime at = DateTime.UtcNow;
+            ColumnsTestForm plain = null;
+            Point offset = Point.Empty;
+            IntPtr notepad = IntPtr.Zero;
+            var poll = new Timer { Interval = 100 };
+            var deadline = new Timer { Interval = 90000 };
+            deadline.Tick += (s, e) => { deadline.Stop(); poll.Stop(); AppStorage.Log("Selftest ring: timed out at stage " + stage); SelfTestExit(1); };
+            void Fail(int code, string why) { poll.Stop(); deadline.Stop(); AppStorage.Log("Selftest ring: FAIL " + why); SelfTestExit(code); }
+            void Next(int st) { stage = st; at = DateTime.UtcNow; }
+            double Since() => (DateTime.UtcNow - at).TotalMilliseconds;
+            bool HitsRing(Point p)
+            {
+                var h = Native.WindowFromPoint(new Native.POINT(p.X, p.Y));
+                return h == _ring.Handle || Native.GetAncestor(h, Native.GA_ROOT) == _ring.Handle;
+            }
+            Point Center(Rectangle r) => new Point(r.X + r.Width / 2, r.Y + r.Height / 2);
+            bool Docked() { var r = _ring.RingBounds; var wa = Screen.FromRectangle(r).WorkingArea; return (_ring.Edge == DockEdge.Left && r.X - wa.X < r.Width) || (_ring.Edge == DockEdge.Right && wa.Right - r.Right < r.Width); }
+            bool BesideRing()
+            {
+                var b = _bubble.Area; var r = _ring.RingBounds; var wa = Screen.FromRectangle(r).WorkingArea;
+                bool onScreen = wa.Contains(b);
+                bool beside = (b.X >= r.Right || b.Right <= r.X) && b.Y < r.Bottom && b.Bottom > r.Y;
+                return onScreen && beside;
+            }
+
+            poll.Tick += async (s, e) =>
+            {
+                switch (stage)
+                {
+                    case 0:
+                    {
+                        _ring.RestDelayMs = 1500;
+                        var c = Center(_ring.RingBounds);
+                        bool hole = HitsRing(c);
+                        AppStorage.Log("Selftest ring: hole_hits_ring=" + hole + " ring=" + _ring.RingBounds);
+                        if (!hole) { Fail(11, "hole not clickable"); return; }
+                        Next(1);
+                        break;
+                    }
+                    case 1:
+                        if (Since() > 6000) { Fail(12, "did not rest"); return; }
+                        if (!_ring.Resting || _ring.RestAmount < 1) return;
+                    {
+                        var v = _ring.VisibleRingBounds;
+                        bool small = v.Width <= _ring.RingSize * 0.65;
+                        bool hole = HitsRing(Center(v));
+                        AppStorage.Log("Selftest ring: resting after_ms=" + (int)Since() + " visible=" + v.Width + "/" + _ring.RingSize + " hole_hits_ring=" + hole);
+                        if (!small || !hole) { Fail(12, "resting ring size/hit"); return; }
+                        // A real click (SendInput) in the middle of the resting ring: wakes it and does nothing else.
+                        _ringClicks = 0;
+                        int downs = _ring.MouseDowns;
+                        SendClick(Center(v));
+                        offset = new Point(downs, 0);
+                        Next(2);
+                        break;
+                    }
+                    case 2:
+                        if (Since() < 900) return;
+                    {
+                        bool woke = !_ring.Resting && _ring.RestAmount < 0.01;
+                        bool gotClick = _ring.MouseDowns > offset.X;
+                        AppStorage.Log("Selftest ring: real_click_reached_ring=" + gotClick + " woke=" + woke + " taps_counted=" + _ringClicks);
+                        if (!gotClick || !woke || _ringClicks != 0) { Fail(13, "wake tap"); return; }
+                        Next(3);
+                        break;
+                    }
+                    case 3:
+                        if (Since() > 6000) { Fail(12, "did not rest again"); return; }
+                        if (!_ring.Resting) return;
+                        AppStorage.Log("Selftest ring: rested again after_ms=" + (int)Since());
+                        _ring.RestDelayMs = 10000;
+                        _ring.Wake();
+                        _ring.State = RingState.Polishing;
+                        offset = new Point((int)_ring.SpinAngle, 0);
+                        Next(4);
+                        break;
+                    case 4:
+                        if (Since() < 500) return;
+                    {
+                        bool spun = _ring.Spinning && Math.Abs(_ring.SpinAngle - offset.X) > 1;
+                        _ring.State = RingState.Idle;
+                        bool stopped = !_ring.Spinning;
+                        AppStorage.Log("Selftest ring: spinning=" + spun + " stopped_after=" + stopped);
+                        if (!spun || !stopped) { Fail(14, "spinner"); return; }
+                        // Move together: open the Words bubble, drag the ring, then drag the bubble.
+                        stage = 40; // busy while awaiting
+                        _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+                        await Task.Delay(300);
+                        var off = new Point(_bubble.Area.X - _ring.RingBounds.X, _bubble.Area.Y - _ring.RingBounds.Y);
+                        int dx = _ring.Edge == DockEdge.Right ? -350 : 350;
+                        _ring.SimulateDrag(dx, 120, release: false);
+                        var off2 = new Point(_bubble.Area.X - _ring.RingBounds.X, _bubble.Area.Y - _ring.RingBounds.Y);
+                        bool followed = off2 == off;
+                        _ring.SimulateRelease();
+                        bool docked1 = Docked(), beside1 = BesideRing();
+                        AppStorage.Log("Selftest ring: bubble_follows_ring=" + followed + " ring_docked=" + docked1 + " edge=" + _ring.Edge + " bubble_beside=" + beside1);
+                        var r0 = _ring.RingBounds; var b0 = _bubble.Area;
+                        _bubble.SimulateDrag(-200, -90, release: false);
+                        bool ringFollowed = _ring.RingBounds.X - r0.X == _bubble.Area.X - b0.X && _ring.RingBounds.Y - r0.Y == _bubble.Area.Y - b0.Y && _bubble.Area.X != b0.X;
+                        _bubble.SimulateDrag(0, 0, release: true);
+                        bool docked2 = Docked(), beside2 = BesideRing();
+                        AppStorage.Log("Selftest ring: ring_follows_bubble=" + ringFollowed + " ring_docked=" + docked2 + " edge=" + _ring.Edge + " bubble_beside=" + beside2);
+                        // Dragging the ring across to the other side flips the bubble to stay on screen.
+                        var wa = Screen.FromRectangle(_ring.RingBounds).WorkingArea;
+                        int across = _ring.Edge == DockEdge.Left ? wa.Width - 100 : -(wa.Width - 100);
+                        _ring.SimulateDrag(across, 0, release: true);
+                        bool beside3 = BesideRing();
+                        AppStorage.Log("Selftest ring: other_side edge=" + _ring.Edge + " bubble_beside=" + beside3);
+                        _bubble.Close2();
+                        if (!followed || !docked1 || !beside1 || !ringFollowed || !docked2 || !beside2 || !beside3) { Fail(15, "move together"); return; }
+                        Next(5);
+                        break;
+                    }
+                    case 5:
+                    {
+                        foreach (var p in System.Diagnostics.Process.GetProcessesByName("notepad")) if (p.MainWindowHandle != IntPtr.Zero) { notepad = p.MainWindowHandle; break; }
+                        if (notepad == IntPtr.Zero) { Fail(16, "no Notepad"); return; }
+                        Native.SetForegroundWindow(notepad);
+                        Next(6);
+                        break;
+                    }
+                    case 6:
+                    {
+                        if (Since() < 800) return;
+                        stage = 60; // busy
+                        _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+                        var info = await _field.BeginAsync(notepad);
+                        ApplyField(info);
+                        var edit = Native.FindWindowEx(notepad, IntPtr.Zero, "Edit", null);
+                        Native.GetWindowRect(edit, out var er);
+                        var editRect = Rectangle.FromLTRB(er.Left, er.Top, er.Right, er.Bottom);
+                        var o = _field.Outline;
+                        bool near = Math.Abs(o.X - editRect.X) <= 12 && Math.Abs(o.Y - editRect.Y) <= 12 && Math.Abs(o.Right - editRect.Right) <= 12 && Math.Abs(o.Bottom - editRect.Bottom) <= 12;
+                        AppStorage.Log("Selftest ring: notepad " + DescribeField(info) + " edit=" + editRect.Width + "x" + editRect.Height +
+                                       " outline_matches_edit=" + near + " glow_active=" + _field.Active + " note_empty=" + (_bubble.Note.Length == 0));
+                        if (!info.Editable || !_field.Active || !near || _bubble.Note.Length != 0) { Fail(16, "Notepad field"); return; }
+                        _field.Hide();
+                        bool hidden = !_field.Active;
+                        AppStorage.Log("Selftest ring: outline hidden=" + hidden);
+                        if (!hidden) { Fail(16, "outline did not hide"); return; }
+                        // A window with no text field at all.
+                        plain = new ColumnsTestForm();
+                        plain.Show();
+                        plain.Activate();
+                        Next(7);
+                        break;
+                    }
+                    case 7:
+                    {
+                        if (Since() < 1000) return;
+                        stage = 70;
+                        var info = await _field.BeginAsync(plain.Handle);
+                        ApplyField(info);
+                        await Task.Delay(200);
+                        bool note = _bubble.Note == Messages.NoTextBox;
+                        AppStorage.Log("Selftest ring: plain window " + DescribeField(info) + " note_shown=" + note);
+                        _field.Hide();
+                        _bubble.Close2();
+                        plain.Close();
+                        if (info.Editable || _field.Active || !note) { Fail(17, "no-field note"); return; }
+                        poll.Stop(); deadline.Stop();
+                        AppStorage.Log("Selftest ring: ok=True");
+                        SelfTestExit(0);
+                        break;
+                    }
+                }
+            };
+            var go = new Timer { Interval = 1500 };
+            go.Tick += (s, e) => { go.Stop(); deadline.Start(); poll.Start(); at = DateTime.UtcNow; };
+            go.Start();
+        }
+
+        private static void SendClick(Point p)
+        {
+            var vs = SystemInformation.VirtualScreen;
+            int ax = (int)Math.Round((p.X - vs.X) * 65535.0 / Math.Max(1, vs.Width - 1));
+            int ay = (int)Math.Round((p.Y - vs.Y) * 65535.0 / Math.Max(1, vs.Height - 1));
+            uint abs = Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK;
+            var inputs = new[]
+            {
+                Mouse(ax, ay, Native.MOUSEEVENTF_MOVE | abs),
+                Mouse(ax, ay, Native.MOUSEEVENTF_LEFTDOWN | abs),
+                Mouse(ax, ay, Native.MOUSEEVENTF_LEFTUP | abs),
+            };
+            Native.SendInput((uint)inputs.Length, inputs, System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.INPUT)));
+        }
+
+        private static Native.INPUT Mouse(int x, int y, uint flags) =>
+            new Native.INPUT { type = 0, u = new Native.InputUnion { mi = new Native.MOUSEINPUT { dx = x, dy = y, dwFlags = flags } } };
+
         private static string GetWindowText(IntPtr hwnd)
         {
             int len = (int)Native.SendMessage(hwnd, Native.WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
@@ -608,6 +871,7 @@ namespace Rapcha.Win
         {
             CloseOverlay();
             _glow.Dispose();
+            _field.Dispose();
             Cancel(null);
             _tray.Visible = false;
             _tray.Dispose();

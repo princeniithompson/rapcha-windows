@@ -14,9 +14,9 @@ namespace Rapcha.Tests
         [Theory]
         [InlineData(10, 500, DockEdge.Left)]
         [InlineData(1900, 500, DockEdge.Right)]
-        [InlineData(900, 5, DockEdge.Top)]
-        [InlineData(900, 1030, DockEdge.Bottom)]
-        [InlineData(960, 520, DockEdge.Top)]      // dead centre still goes to an edge
+        [InlineData(900, 5, DockEdge.Left)]       // side edges only: near the top still docks left or right
+        [InlineData(1000, 1030, DockEdge.Right)]
+        [InlineData(960, 520, DockEdge.Left)]     // dead centre still goes to an edge
         [InlineData(-300, 400, DockEdge.Left)]    // off screen is clamped
         [InlineData(3000, 400, DockEdge.Right)]
         public void SnapsToNearestEdge(int cx, int cy, DockEdge expected)

@@ -14,18 +14,27 @@ namespace Rapcha.Win
     /// </summary>
     public sealed class EdgeGlow : IDisposable
     {
-        private const int ThicknessDip = 12;
+        private readonly int ThicknessDip;
+        private readonly bool _outward;
         private Rectangle _bounds;
         private Form _owner;
         private readonly List<Strip> _strips = new List<Strip>();
-        private readonly Timer _timer = new Timer { Interval = 33 };
+        private readonly Timer _timer;
         private readonly DateTime _born = DateTime.UtcNow;
 
         public bool Active { get; private set; }
         public int WindowCount => _strips.Count;
 
-        public EdgeGlow()
+        public Rectangle Bounds => _bounds;
+
+        /// <param name="thicknessDip">Glow depth.</param>
+        /// <param name="outward">false: glows inward from the edges of the bounds (the screen edge);
+        /// true: an outline just outside the bounds (a text field), brightest at the field's border.</param>
+        public EdgeGlow(int thicknessDip = 12, bool outward = false, int intervalMs = 33)
         {
+            ThicknessDip = thicknessDip;
+            _outward = outward;
+            _timer = new Timer { Interval = intervalMs };
             _timer.Tick += (s, e) => RenderAll();
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         }
@@ -64,12 +73,13 @@ namespace Rapcha.Win
                 var b = _bounds;
                 int dpi = Native.DpiAt(b.X + b.Width / 2, b.Y + b.Height / 2);
                 int t = Math.Max(4, (int)Math.Round(ThicknessDip * dpi / 96.0));
+                if (_outward) b.Inflate(t, t);
                 int per = 2 * (b.Width + b.Height);
                 // Perimeter runs clockwise from the top-left corner: top, right, bottom, left.
-                _strips.Add(new Strip(b.X, b.Y, b.Width, t, Side.Top, 0, per));
-                _strips.Add(new Strip(b.Right - t, b.Y + t, t, b.Height - 2 * t, Side.Right, b.Width + t, per));
-                _strips.Add(new Strip(b.X, b.Bottom - t, b.Width, t, Side.Bottom, b.Width + b.Height, per));
-                _strips.Add(new Strip(b.X, b.Y + t, t, b.Height - 2 * t, Side.Left, 2 * b.Width + b.Height + t, per));
+                _strips.Add(new Strip(b.X, b.Y, b.Width, t, Side.Top, 0, per, _outward));
+                _strips.Add(new Strip(b.Right - t, b.Y + t, t, b.Height - 2 * t, Side.Right, b.Width + t, per, _outward));
+                _strips.Add(new Strip(b.X, b.Bottom - t, b.Width, t, Side.Bottom, b.Width + b.Height, per, _outward));
+                _strips.Add(new Strip(b.X, b.Y + t, t, b.Height - 2 * t, Side.Left, 2 * b.Width + b.Height + t, per, _outward));
             }
         }
 
@@ -93,13 +103,15 @@ namespace Rapcha.Win
         {
             private readonly int _x, _y, _w, _h, _perimeterStart, _perimeter;
             private readonly Side _side;
+            private readonly bool _outward;
             private readonly int[] _pixels;
             private readonly float[] _along;
             private int[] _rgb;
             private IntPtr _dib, _bits, _memDc, _oldObj;
 
-            public Strip(int x, int y, int w, int h, Side side, int perimeterStart, int perimeter) : base(true)
+            public Strip(int x, int y, int w, int h, Side side, int perimeterStart, int perimeter, bool outward) : base(true)
             {
+                _outward = outward;
                 _x = x; _y = y; _w = Math.Max(1, w); _h = Math.Max(1, h);
                 _side = side; _perimeterStart = perimeterStart; _perimeter = Math.Max(1, perimeter);
                 _pixels = new int[_w * _h];
@@ -145,6 +157,7 @@ namespace Rapcha.Win
                         int i = horiz ? x : y;
                         int depth = _side == Side.Top ? y : _side == Side.Bottom ? _h - 1 - y : _side == Side.Left ? x : _w - 1 - x;
                         int thick = horiz ? _h : _w;
+                        if (_outward) depth = thick - 1 - depth; // brightest against the field, fading outwards
                         float fade = 1f - depth / (float)thick;
                         fade *= fade;
                         float a = _along[i] * fade;

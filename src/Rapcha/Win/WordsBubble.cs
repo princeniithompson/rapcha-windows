@@ -29,6 +29,18 @@ namespace Rapcha.Win
         public event Action CancelClicked;
         public event Action CompleteClicked;
         public event Action FixMicClicked;
+        public event Action<int, int> Dragged;   // moved by (dx, dy) while the user drags the bubble
+        public event Action DragEnded;
+
+        private bool _down, _dragging;
+        private Point _downScreen, _lastScreen;
+        private string _note = "";
+
+        public Rectangle Area => new Rectangle(_x, _y, _w, _h);
+        public bool IsDragging => _dragging;
+
+        /// <summary>A small grey line in the bubble, e.g. "No text box — I'll copy it for you."</summary>
+        public string Note { get => _note; set { _note = value ?? ""; Render(); } }
 
         public WordsBubble() : base(false)
         {
@@ -41,21 +53,35 @@ namespace Rapcha.Win
         {
             _dpi = dpi;
             _w = S(WidthDip); _h = S(HeightDip);
-            int gap = S(12);
-            switch (edge)
-            {
-                case DockEdge.Left: _x = ring.Right + gap; _y = ring.Y + ring.Height / 2 - _h / 2; break;
-                case DockEdge.Right: _x = ring.X - gap - _w; _y = ring.Y + ring.Height / 2 - _h / 2; break;
-                case DockEdge.Top: _x = ring.X + ring.Width / 2 - _w / 2; _y = ring.Bottom + gap; break;
-                default: _x = ring.X + ring.Width / 2 - _w / 2; _y = ring.Y - gap - _h; break;
-            }
-            var wa = Screen.FromRectangle(ring).WorkingArea;
-            _x = Math.Max(wa.X, Math.Min(_x, wa.Right - _w));
-            _y = Math.Max(wa.Y, Math.Min(_y, wa.Bottom - _h));
+            Place(ring, edge);
             _micHint = false;
+            _note = "";
             Set(Mode.Listening, "");
             if (!Visible) Show();
             KeepOnTop();
+        }
+
+        /// <summary>Beside the ring on the screen side (flips to the other side if it would leave the screen).</summary>
+        public void PlaceBeside(Rectangle ring, DockEdge edge)
+        {
+            if (_w <= 0) return;
+            Place(ring, edge);
+            Render();
+        }
+
+        private void Place(Rectangle ring, DockEdge edge)
+        {
+            var wa = Screen.FromRectangle(ring).WorkingArea;
+            BubblePlacement.Beside(new IntRect(ring.X, ring.Y, ring.Width, ring.Height), edge, _w, _h,
+                                   new IntRect(wa.X, wa.Y, wa.Width, wa.Height), S(12), out _x, out _y);
+        }
+
+        /// <summary>Moves the bubble (it follows the ring being dragged).</summary>
+        public void MoveTo(int x, int y)
+        {
+            if (_x == x && _y == y) return;
+            _x = x; _y = y;
+            Render();
         }
 
         public void Set(Mode mode, string text)
@@ -132,11 +158,17 @@ namespace Rapcha.Win
                             else
                                 DrawText(g, FitTail(g, _text, big, textRect), big, Color.White, textRect);
                             DrawButtons(g, small);
+                            DrawNote(g);
                             break;
                         case Mode.Polishing:
                             DrawText(g, _text.Length > 0 ? FitTail(g, _text, big, textRect) : "Polishing…", big,
                                 Color.FromArgb(200, 205, 195), textRect);
                             DrawText(g, "Polishing…", small, Color.FromArgb(230, 210, 120), new Rectangle(pad, _h - S(36), _w - pad * 2, S(24)));
+                            if (_note.Length > 0)
+                                using (var nf = new Font("Segoe UI", S(12), FontStyle.Regular, GraphicsUnit.Pixel))
+                                using (var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+                                using (var nb = new SolidBrush(Color.FromArgb(185, 190, 180)))
+                                    g.DrawString(_note, nf, nb, new RectangleF(pad, _h - S(36), _w - pad * 2, S(24)), sf);
                             break;
                         case Mode.Final:
                             DrawText(g, FitTail(g, _text, big, textRect), big, Color.White, textRect);
@@ -169,6 +201,17 @@ namespace Rapcha.Win
             using (var path = Rounded(_completeRect, bh))
             using (var b = new SolidBrush(Color.FromArgb(255, 150, 175, 55))) g.FillPath(b, path);
             DrawText(g, label, f, Color.FromArgb(20, 25, 15), _completeRect, true, true);
+        }
+
+        private void DrawNote(Graphics g)
+        {
+            if (_note.Length == 0 || _cancelRect.IsEmpty) return;
+            var r = Rectangle.FromLTRB(_cancelRect.Right + S(8), _cancelRect.Y - S(4), _completeRect.X - S(8), _cancelRect.Bottom + S(4));
+            if (r.Width <= 0) return;
+            using (var nf = new Font("Segoe UI", S(12), FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord })
+            using (var nb = new SolidBrush(Color.FromArgb(185, 190, 180)))
+                g.DrawString(_note, nf, nb, r, sf);
         }
 
         private Rectangle DrawLink(Graphics g, string text, Font f, int x, int y)
@@ -208,20 +251,59 @@ namespace Rapcha.Win
             return "…" + text.Substring(lo).TrimStart();
         }
 
+        private bool OnButton(Point p) => _cancelRect.Contains(p) || _completeRect.Contains(p) || _fixRect.Contains(p);
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || OnButton(e.Location)) return;
+            _down = true;
+            _dragging = false;
+            _downScreen = _lastScreen = Cursor.Position;
+        }
+
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            bool hot = _cancelRect.Contains(e.Location) || _completeRect.Contains(e.Location) || _fixRect.Contains(e.Location);
-            Cursor = hot ? Cursors.Hand : Cursors.Default;
+            Cursor = OnButton(e.Location) ? Cursors.Hand : _down ? Cursors.SizeAll : Cursors.Default;
+            if (_down) DragTo(Cursor.Position);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left) return;
+            if (_down)
+            {
+                _down = false;
+                if (_dragging) { _dragging = false; DragEnded?.Invoke(); }
+                return;
+            }
             if (_completeRect.Contains(e.Location)) CompleteClicked?.Invoke();
             else if (_cancelRect.Contains(e.Location)) CancelClicked?.Invoke();
             else if (_fixRect.Contains(e.Location)) FixMicClicked?.Invoke();
+        }
+
+        private void DragTo(Point p)
+        {
+            var drag = SystemInformation.DragSize;
+            if (!_dragging && (Math.Abs(p.X - _downScreen.X) > drag.Width || Math.Abs(p.Y - _downScreen.Y) > drag.Height)) _dragging = true;
+            if (!_dragging) return;
+            int dx = p.X - _lastScreen.X, dy = p.Y - _lastScreen.Y;
+            _lastScreen = p;
+            if (dx == 0 && dy == 0) return;
+            MoveTo(_x + dx, _y + dy);
+            Dragged?.Invoke(dx, dy);
+        }
+
+        /// <summary>Self-test: drags the bubble by (dx, dy) through the same code as the mouse, then releases.</summary>
+        public void SimulateDrag(int dx, int dy, bool release)
+        {
+            var start = new Point(_x + _w / 2, _y + S(20));
+            _down = true; _dragging = false; _downScreen = _lastScreen = start;
+            DragTo(new Point(start.X + dx / 2, start.Y + dy / 2));
+            DragTo(new Point(start.X + dx, start.Y + dy));
+            if (release) { _down = false; if (_dragging) { _dragging = false; DragEnded?.Invoke(); } }
         }
 
         private static GraphicsPath Rounded(Rectangle r, int diameter)
