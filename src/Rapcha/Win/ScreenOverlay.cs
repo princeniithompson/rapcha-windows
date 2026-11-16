@@ -26,13 +26,17 @@ namespace Rapcha.Win
 
         private readonly Bitmap _dark;
         private readonly int _dpi;
-        private readonly BoxSelector _selector = new BoxSelector();
+        private readonly BoxSelector _selector;
         private readonly System.Windows.Forms.Timer _anim = new System.Windows.Forms.Timer { Interval = 33 };
+        private readonly System.Windows.Forms.Timer _tapTimer = new System.Windows.Forms.Timer { Interval = 15 };
         private readonly DateTime _born = DateTime.UtcNow;
         private readonly bool _silentVoice;
+        private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+        /// <summary>Monotonic milliseconds for the gesture state machine.</summary>
+        internal static long Now() => Clock.ElapsedMilliseconds;
 
         private OcrService.Result _ocr;
-        private string _status = "Reading the screen…";
+        private string _status = "";
         private IReadAloud _reader;
         private SpokenText _spoken;
         private Box _hl, _hlFrom, _hlTarget;
@@ -40,40 +44,62 @@ namespace Rapcha.Win
         private bool _hlVisible;
         private Rectangle _lastBoxRect, _lastHlRect;
         private (double x, double y)? _pendingTap;
+        private Box? _pendingBox;
         private readonly Dictionary<Control, Rectangle> _controls = new Dictionary<Control, Rectangle>();
         private Control _pressed = Control.None;
         private Font _font, _small;
 
-        // Preview of what the box snapped to: soft green outlines with numbers, then reading starts.
-        public const int PreviewMs = 220;
-        /// <summary>How long a selection waits for its own sharper OCR passes before reading what is ready.</summary>
-        public const int RegionBudgetMs = 650;
+        // The snapped text is outlined (numbered when there are several blocks) the moment reading starts; the
+        // outlines soften after this long. Reading never waits for them.
+        public const int PreviewMs = 450;
         public const int TapPatchBudgetMs = 1500;
         private List<SnapPart> _preview;
         private bool _previewStrong;
         private readonly System.Windows.Forms.Timer _previewTimer = new System.Windows.Forms.Timer { Interval = PreviewMs };
-        private List<OcrWord> _pendingWords;
-        /// <summary>A selection is being prepared: sharper passes running, or the snapped text shown before reading.</summary>
-        public bool Previewing => _previewTimer.Enabled || _preparing > 0;
+        /// <summary>A selection is waiting for its text (the first look at the screen, a closer look around a tap, or a pending tap).</summary>
+        public bool Previewing => _preparing > 0 || _pendingBox.HasValue || _pendingTap.HasValue || _selector.Current == BoxSelector.State.TapPending;
         private int _preparing;
         public int PreviewParts { get; private set; }
 
         public string LastReadText { get; private set; } = "";
         /// <summary>The OCR words of the last read, in order (the screen's own text, before code is made sayable).</summary>
         public List<OcrWord> LastReadWords { get; private set; } = new List<OcrWord>();
-        /// <summary>Release of the box (or the tap) to the first spoken word, ms; -1 until it happens.</summary>
+        /// <summary>Release of the box (or of the tap's click) to the first audio, ms; -1 until it happens.</summary>
         public int FirstWordMs { get; private set; } = -1;
+        /// <summary>Release to the words being handed to the voice (snap done), ms.</summary>
+        public int WordsReadyMs { get; private set; } = -1;
+        /// <summary>The gesture of the last read: "box" (drag), "corners" (two clicks), "tap".</summary>
+        public string LastMode { get; private set; } = "";
+        /// <summary>What the last read used: "index" (complete), "partial", "fast" (first look only), "quick" (its own passes), "patch".</summary>
+        public string LastIndexState { get; private set; } = "";
         public int RegionPassesUsed { get; private set; }
         public int TapPatches { get; private set; }
+        public int TapsPrepared { get; private set; }
+        /// <summary>Selections started (a box released or a tap read), for self-tests.</summary>
+        public int ReadCount { get; private set; }
         public FrameSource Source { get; }
         private DateTime _releaseAt;
         private bool _waitFirstWord;
         private int _selGen;
-        private readonly List<OcrPass> _extraPasses = new List<OcrPass>();
-        private bool _enhancing;
         public int HighlightMoves { get; private set; }
         public IReadAloud Reader => _reader;
         public OcrService.Result Ocr => _ocr;
+        public BoxSelector.State GestureState => _selector.Current;
+
+        // ---- the background index
+        private System.Threading.Thread _indexThread;
+        private volatile bool _closing;
+        private long _hotUntil;              // Now() ms: the index pauses until then (a selection is being read)
+        private readonly DateTime _openedAt = DateTime.UtcNow;
+        private int _indexJobs, _indexDone;
+        /// <summary>Every background pass is merged into the index.</summary>
+        public bool IndexReady { get; private set; }
+        /// <summary>Overlay open to the first look (fast pass) being usable, ms.</summary>
+        public int FastPassMs { get; private set; } = -1;
+        /// <summary>Overlay open to the whole index being ready, ms.</summary>
+        public int IndexMs { get; private set; } = -1;
+        private SnapPart _tapPrep;
+        private string _tapPrepText;
 
         public event Action<Control> ControlUsed;
 
@@ -81,8 +107,9 @@ namespace Rapcha.Win
         {
             _dpi = dpi;
             _silentVoice = silentVoice;
-            Source = FrameSource.From(screenshot); // physical pixels, for the sharper passes on a selection
-            Voices.WarmUp();                        // so the first word is not held up by the voice starting cold
+            Source = FrameSource.From(screenshot); // physical pixels, for the OCR index
+            _selector = new BoxSelector(BoxSelector.MoveThresholdPx * dpi / 96.0);
+            Voices.WarmUp();                        // once per process: loads the voice data off the UI thread
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
@@ -109,38 +136,127 @@ namespace Rapcha.Win
                 _previewTimer.Stop();
                 _previewStrong = false;
                 InvalidatePreview();
-                var words = _pendingWords;
-                _pendingWords = null;
-                if (words != null) ReadWords(words);
             };
+            _tapTimer.Tick += (s, e) =>
+            {
+                if (_selector.Current != BoxSelector.State.TapPending) { _tapTimer.Stop(); return; }
+                var r = _selector.Tick(Now());
+                if (r.Kind != BoxSelector.Kind.None) { _tapTimer.Stop(); Selection(r); }
+            };
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // The voice is created once for the app and kept; make sure it is primed (engine + audio output open)
+            // while the user positions the pointer.
+            // (After the first paint: a cold engine may take a moment and must not delay the overlay appearing.)
+            System.Threading.Tasks.Task.Delay(60).ContinueWith(_ => OnUi(() => { if (!IsDisposed) Voices.PrimeShared(_silentVoice); }));
         }
 
         private float S(double dip) => (float)(dip * _dpi / 96.0);
         private int Si(double dip) => (int)Math.Round(dip * _dpi / 96.0);
 
-        // ---------------- OCR ----------------
+        // ---------------- The screen index ----------------
+        //
+        // On open: one fast colour pass over the whole frozen screen (usually well under a second), then the other
+        // passes one at a time on a low-priority thread, each merged into lines and blocks off the UI thread and
+        // swapped in. A box or tap reads from whatever index is there at the release: no OCR on the hot path.
+
+        /// <summary>Starts the index (the app calls this right after showing the overlay).</summary>
+        public void StartIndex()
+        {
+            OcrService.FastAsync(Source, _dpi).ContinueWith(t =>
+            {
+                var r = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion ? t.Result : new OcrService.Result { Problem = "Couldn't read the screen. Try again." };
+                OnUi(() => SetOcr(r));
+            });
+        }
 
         public void SetOcr(OcrService.Result r)
         {
+            bool first = _ocr == null;
             _ocr = r;
-            if (_extraPasses.Count > 0 && r.Problem.Length == 0) { r.Passes.AddRange(_extraPasses); OcrService.Rebuild(r); }
+            if (first)
+            {
+                FastPassMs = (int)(DateTime.UtcNow - _openedAt).TotalMilliseconds;
+                AppStorage.Log("Overlay index: first look open_to_ready_ms=" + FastPassMs + " ocr_ms=" + r.Ms + " passes=" + r.Passes.Count +
+                               " words=" + r.Page.WordCount + " lines=" + r.Page.Lines.Count + " blocks=" + r.Page.Blocks.Count + (r.Problem.Length > 0 ? " problem=yes" : ""));
+            }
             if (r.Problem.Length > 0) _status = r.Problem;
             else if (r.Page.WordCount == 0) _status = "No text found on this screen.";
             else _status = "";
             InvalidateBottom();
-            if (_pendingTap.HasValue)
+            if (r.Problem.Length == 0) StartBackgroundIndex();
+            // A selection made before the first look was back.
+            if (_pendingBox.HasValue) { var b = _pendingBox.Value; _pendingBox = null; ReadBoxNow(b, "fast"); }
+            else if (_pendingTap.HasValue) { var (x, y) = _pendingTap.Value; _pendingTap = null; ReadTapNow(x, y); }
+        }
+
+        private void StartBackgroundIndex()
+        {
+            if (_indexThread != null || _ocr == null) return;
+            var have = new HashSet<string>(_ocr.Passes.Select(p => p.Name));
+            var jobs = OcrService.IndexJobs(Source, _dpi, YieldToReading).Where(j => !have.Contains(j.name)).ToList();
+            _indexJobs = jobs.Count;
+            if (jobs.Count == 0) { IndexReady = true; IndexMs = (int)(DateTime.UtcNow - _openedAt).TotalMilliseconds; return; }
+            var basePasses = _ocr.Passes.ToList();
+            string lang = _ocr.Language;
+            double scale = _ocr.Scale;
+            int firstMs = _ocr.Ms;
+            _indexThread = new System.Threading.Thread(() =>
             {
-                var (x, y) = _pendingTap.Value;
-                _pendingTap = null;
-                var line = r.Page.NearestLine(x, y, TapRadius);
-                if (line != null) { _selector.Cancel(); ReadLine(line); }
-                else if (_selector.WaitingForSecondCorner) TapPatch(x, y);
+                var all = new List<OcrPass>(basePasses);
+                foreach (var job in jobs)
+                {
+                    YieldToReading();
+                    if (_closing) return;
+                    OcrPass p = null;
+                    try { p = job.run(); }
+                    catch (Exception e) { AppStorage.Log("Overlay index: pass failed " + e.GetType().Name); }
+                    if (_closing) return;
+                    OcrService.Result r = null;
+                    if (p != null)
+                    {
+                        all.Add(p);
+                        r = new OcrService.Result { Language = lang, Scale = scale, Ms = firstMs };
+                        r.Passes.AddRange(all);
+                        YieldToReading();
+                        var t0 = DateTime.UtcNow;
+                        OcrService.Rebuild(r);   // merge + lines + blocks, off the UI thread
+                        p.MergeMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    }
+                    var name = job.name;
+                    OnUi(() => IndexStep(r, name, p));
+                }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal, Name = "Rapcha OCR index" };
+            _indexThread.Start();
+        }
+
+        /// <summary>Background passes wait while a selection is being read (so the voice starts without competition).</summary>
+        private void YieldToReading()
+        {
+            while (!_closing && Now() < System.Threading.Interlocked.Read(ref _hotUntil)) System.Threading.Thread.Sleep(40);
+        }
+
+        private void MarkHot(int ms) => System.Threading.Interlocked.Exchange(ref _hotUntil, Now() + ms);
+
+        private void IndexStep(OcrService.Result r, string name, OcrPass p)
+        {
+            if (IsDisposed || _closing) return;
+            _indexDone++;
+            if (r != null && _ocr != null && _ocr.Problem.Length == 0)
+            {
+                _ocr = r;
+                if (_status == "No text found on this screen." && r.Page.WordCount > 0) { _status = ""; InvalidateBottom(); }
             }
-            // A sharper look at the whole screen in the background, so later boxes and taps start from it.
-            if (r.Problem.Length == 0 && !_enhancing)
+            AppStorage.Log("Overlay index: +" + name + " pass_ms=" + (p?.Ms ?? -1) + " merge_ms=" + (p?.MergeMs ?? -1) + " words=" + (_ocr?.Page.WordCount ?? 0) + " done=" + _indexDone + "/" + _indexJobs);
+            if (_indexDone >= _indexJobs && !IndexReady)
             {
-                _enhancing = true;
-                OcrService.EnhanceAsync(Source, _dpi).ContinueWith(t => OnUi(() => { if (t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion) AddPasses(new[] { t.Result }); }));
+                IndexReady = true;
+                IndexMs = (int)(DateTime.UtcNow - _openedAt).TotalMilliseconds;
+                AppStorage.Log("Overlay index: ready open_to_ready_ms=" + IndexMs + " passes=" + (_ocr?.Passes.Count ?? 0) + " words=" + (_ocr?.Page.WordCount ?? 0) +
+                               " lines=" + (_ocr?.Page.Lines.Count ?? 0) + " blocks=" + (_ocr?.Page.Blocks.Count ?? 0));
             }
         }
 
@@ -152,133 +268,187 @@ namespace Rapcha.Win
             try { if (!IsDisposed && IsHandleCreated) BeginInvoke(a); } catch { }
         }
 
-        /// <summary>Adds finished passes (any order, any time) and rebuilds the merged page.</summary>
-        private void AddPasses(IEnumerable<OcrPass> passes)
-        {
-            var list = passes.Where(p => p != null).ToList();
-            if (list.Count == 0 || IsDisposed) return;
-            if (_ocr == null || _ocr.Problem.Length > 0) { _extraPasses.AddRange(list); return; }
-            _ocr.Passes.AddRange(list);
-            OcrService.Rebuild(_ocr);
-            if (_status == "No text found on this screen." && _ocr.Page.WordCount > 0) { _status = ""; InvalidateBottom(); }
-            AppStorage.Log("Overlay passes: +" + string.Join(",", list.Select(p => p.Name + "(" + p.Ms + "ms)")) + " total=" + _ocr.Passes.Count + " words=" + _ocr.Page.WordCount);
-        }
-
-        /// <summary>Runs the region passes; waits up to the budget, keeps the rest coming in the background.</summary>
-        private async System.Threading.Tasks.Task<int> RegionAsync(Box area, int budgetMs)
-        {
-            var tasks = OcrService.RegionPasses(Source, area, _dpi);
-            if (tasks.Count == 0) return 0;
-            var all = System.Threading.Tasks.Task.WhenAll(tasks);
-            await System.Threading.Tasks.Task.WhenAny(all, System.Threading.Tasks.Task.Delay(budgetMs));
-            var done = tasks.Where(t => t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion).ToList();
-            foreach (var t in tasks.Except(done))
-                _ = t.ContinueWith(x => OnUi(() => { if (x.Status == System.Threading.Tasks.TaskStatus.RanToCompletion) AddPasses(new[] { x.Result }); }));
-            var ready = done.Select(t => t.Result).Where(p => p != null).ToList();
-            if (_ocr == null && ready.Count > 0)
-            {
-                // The whole-screen look isn't back yet: read from the selection's own passes.
-                _extraPasses.AddRange(ready);
-                var tmp = new OcrService.Result();
-                tmp.Passes.AddRange(_extraPasses);
-                OcrService.Rebuild(tmp);
-                _regionOnly = tmp;
-            }
-            else AddPasses(ready);
-            return ready.Count;
-        }
-
         private OcrService.Result _regionOnly;
         private Box _waitBox;
         private PageLayout CurrentPage => _ocr != null && _ocr.Problem.Length == 0 ? _ocr.Page : _regionOnly?.Page;
+        private string IndexState() => IndexReady ? "index" : _indexDone > 0 ? "partial" : "fast";
 
-        /// <summary>No word right under a tap: look closer at the patch around it, then read the nearest line.</summary>
+        // ---------------- Reading ----------------
+
+        /// <summary>The app-wide reader (created once, primed at open), subscribed while this overlay is open.</summary>
+        private IReadAloud Voice()
+        {
+            var shared = Voices.Shared(_silentVoice);
+            if (!ReferenceEquals(shared, _reader))
+            {
+                if (_reader != null) _reader.Changed -= OnReaderChanged;
+                _reader = shared;
+                _reader.Changed += OnReaderChanged;
+            }
+            return _reader;
+        }
+
+        private void BeginSelection(string mode, DateTime releasedAt)
+        {
+            CancelPreview();
+            _reader?.Stop();
+            HideHighlight();
+            LastReadText = "";
+            LastReadWords = new List<OcrWord>();
+            _selGen++;
+            _pendingBox = null; _pendingTap = null;
+            _releaseAt = releasedAt; _waitFirstWord = true; FirstWordMs = -1; WordsReadyMs = -1;
+            LastMode = mode;
+            ReadCount++;
+            MarkHot(2500);
+        }
+
+        /// <summary>Reads a box (drag or two corners): every line it touches, whole, in reading order.</summary>
+        public void ReadBox(Box box) => StartBox(box, "box");
+
+        private void StartBox(Box box, string mode)
+        {
+            BeginSelection(mode, DateTime.UtcNow);
+            DropTapPrep();
+            if (CurrentPage == null)
+            {
+                // Within the first moment after opening: wait for the first look, and look at the box itself meanwhile.
+                _pendingBox = box;
+                _waitBox = box; Invalidate(BoxRect(box.Inflate(S(6))));
+                InvalidateBottom();
+                QuickLook(box);
+                return;
+            }
+            ReadBoxNow(box, IndexState());
+        }
+
+        private async void QuickLook(Box box)
+        {
+            int gen = _selGen;
+            var tasks = OcrService.QuickPasses(Source, box.Inflate(S(14)));
+            if (tasks.Count == 0) return;
+            _preparing++;
+            try { await System.Threading.Tasks.Task.WhenAll(tasks); } catch { }
+            finally { _preparing--; }
+            if (IsDisposed || gen != _selGen || !_pendingBox.HasValue || CurrentPage != null) return;
+            var r = new OcrService.Result();
+            r.Passes.AddRange(tasks.Where(t => t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result != null).Select(t => t.Result));
+            OcrService.Rebuild(r);
+            _regionOnly = r;
+            RegionPassesUsed = r.Passes.Count;
+            var b = _pendingBox.Value;
+            _pendingBox = null;
+            ReadBoxNow(b, "quick");
+        }
+
+        private void ReadBoxNow(Box box, string state)
+        {
+            if (!_waitBox.IsEmpty) { Invalidate(BoxRect(_waitBox.Inflate(S(6)))); _waitBox = new Box(); }
+            var page = CurrentPage;
+            LastIndexState = state;
+            if (page == null) { Say(_ocr != null && _ocr.Problem.Length > 0 ? _ocr.Problem : "Still reading the screen. Try again in a moment."); return; }
+            var t0 = DateTime.UtcNow;
+            var parts = page.Snap(box);
+            AppStorage.Log("Overlay snap: mode=" + LastMode + " index=" + state + " blocks=" + parts.Count + " lines=" + parts.Sum(p => p.Words.Select(w => w.Line).Distinct().Count()) +
+                           " words=" + parts.Sum(p => p.Words.Count) + " snap_ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds +
+                           " kinds=" + string.Join(",", parts.Select(p => p.Kind.ToString()[0] + ":" + (int)(p.LineCoverage * 100) + "%")));
+            if (parts.Count == 0) { Say(NoTextThere); return; }
+            Show(parts);
+        }
+
+        // ---- taps
+
+        private DateTime _tapReleasedAt;
+
+        /// <summary>At the release of a tap: find its paragraph now and start preparing the speech (dropped if it turns into a box).</summary>
+        private void PrepareTap(double x, double y)
+        {
+            _tapReleasedAt = DateTime.UtcNow;
+            MarkHot(1500);
+            _tapPrep = CurrentPage?.ParagraphAt(x, y, TapRadius);
+            _tapPrepText = null;
+            if (_tapPrep == null || _tapPrep.Words.Count == 0) { _tapPrep = null; return; }
+            try
+            {
+                _tapPrepText = new SpokenText(PageLayout.Dedupe(_tapPrep.Words)).Text;
+                Voice().Prepare(_tapPrepText);
+                TapsPrepared++;
+            }
+            catch (Exception e) { AppStorage.Log("Overlay tap prepare failed: " + e.GetType().Name); }
+        }
+
+        private void DropTapPrep()
+        {
+            if (_tapPrep == null && _tapPrepText == null) return;
+            _tapPrep = null; _tapPrepText = null;
+            try { _reader?.Prepare(null); } catch { }
+        }
+
+        private void ReadTap(double x, double y)
+        {
+            var prep = _tapPrep;
+            BeginSelection("tap", _tapReleasedAt == default(DateTime) ? DateTime.UtcNow : _tapReleasedAt);
+            _tapPrep = prep;
+            if (CurrentPage == null) { _pendingTap = (x, y); InvalidateBottom(); return; }
+            ReadTapNow(x, y);
+        }
+
+        private void ReadTapNow(double x, double y)
+        {
+            var part = _tapPrep ?? CurrentPage?.ParagraphAt(x, y, TapRadius);
+            _tapPrep = null; _tapPrepText = null;
+            LastIndexState = IndexState();
+            if (part != null)
+            {
+                AppStorage.Log("Overlay tap: paragraph lines=" + part.Words.Select(w => w.Line).Distinct().Count() + " words=" + part.Words.Count + " index=" + LastIndexState);
+                Show(new List<SnapPart> { part });
+                return;
+            }
+            TapPatch(x, y);
+        }
+
+        /// <summary>No word near a tap: look closer at the patch around it, then read the nearest paragraph there.</summary>
         private async void TapPatch(double x, double y)
         {
             int gen = _selGen;
             TapPatches++;
             var patch = new Box(x - S(300), y - S(100), S(600), S(200));
             var t0 = DateTime.UtcNow;
-            int got;
+            var tasks = OcrService.QuickPasses(Source, patch);
             _preparing++;
-            try { got = await RegionAsync(patch, TapPatchBudgetMs); }
-            finally { _preparing--; }
-            var page = CurrentPage;
-            var line = page?.NearestLine(x, y, TapRadius);
-            AppStorage.Log("Overlay tap patch: passes=" + got + " found=" + (line != null) + " ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
-            if (IsDisposed || gen != _selGen || line == null || !_selector.WaitingForSecondCorner) return;
-            _selector.Cancel();
-            InvalidateBox();
-            ReadLine(line);
-        }
-
-        // ---------------- Reading ----------------
-
-        private IReadAloud Voice()
-        {
-            if (_reader == null)
-            {
-                _reader = Voices.CreateReader(_silentVoice);   // the voice chosen in Settings
-                _reader.Changed += OnReaderChanged;
-            }
-            return _reader;
-        }
-
-        public async void ReadBox(Box box)
-        {
-            CancelPreview();
-            _reader?.Stop();
-            LastReadText = "";
-            LastReadWords = new List<OcrWord>();
-            int gen = ++_selGen;
-            var t0 = DateTime.UtcNow;
-            _waitBox = box; Invalidate(BoxRect(box.Inflate(S(6))));
-            // Sharper passes on the box plus a margin (2x/3x, inverted, thresholded), merged with the whole screen.
-            int used;
-            _preparing++;
-            try { used = await RegionAsync(box.Inflate(S(14)), _ocr == null ? 3000 : RegionBudgetMs); }
+            InvalidateBottom();
+            try { await System.Threading.Tasks.Task.WhenAny(System.Threading.Tasks.Task.WhenAll(tasks), System.Threading.Tasks.Task.Delay(TapPatchBudgetMs)); }
             finally { _preparing--; }
             if (IsDisposed || gen != _selGen) return;
-            Invalidate(BoxRect(box.Inflate(S(6)))); _waitBox = new Box();
-            RegionPassesUsed = used;
-            var page = CurrentPage;
-            if (page == null) { Say(_ocr != null && _ocr.Problem.Length > 0 ? _ocr.Problem : "Still reading the screen. Try again in a moment."); return; }
-            var parts = page.Snap(box);
-            AppStorage.Log("Overlay region: passes=" + used + " wait_ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds +
-                           " parts=" + string.Join(";", parts.Select(p => string.Join(",", p.Words.GroupBy(w => w.Line).Select(g => (int)g.First().LineBox.Y + "/" + (int)g.First().LineBox.H + ":" + g.Count())))));
-            AppStorage.Log("Overlay snap: blocks=" + parts.Count + " " + string.Join(",", parts.Select(p => p.Kind.ToString()[0] + ":" + (int)(p.AreaCoverage * 100) + "%/" + (int)(p.LineCoverage * 100) + "%")) +
-                           " words=" + parts.Sum(p => p.Words.Count));
-            if (parts.Count == 0) { Say(NoTextThere); return; }
-            Preview(parts);
+            var r = new OcrService.Result();
+            r.Passes.AddRange(tasks.Where(t => t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result != null).Select(t => t.Result));
+            OcrService.Rebuild(r);
+            var part = r.Page.ParagraphAt(x, y, TapRadius);
+            AppStorage.Log("Overlay tap patch: passes=" + r.Passes.Count + " found=" + (part != null) + " ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
+            LastIndexState = "patch";
+            if (part == null) { Say(NoTextThere); return; }
+            Show(new List<SnapPart> { part });
         }
 
-        private void ReadLine(TextLine line)
+        /// <summary>Outlines what was picked (numbered when several blocks) and starts reading at once.</summary>
+        private void Show(List<SnapPart> parts)
         {
-            CancelPreview();
-            LastReadText = "";
-            var part = new SnapPart { Block = CurrentPage?.BlockOf(line), Kind = SnapKind.Lines, Box = line.Box };
-            part.Words.AddRange(line.Words);
-            Preview(new List<SnapPart> { part });
-        }
-
-        private void Preview(List<SnapPart> parts)
-        {
-            _reader?.Stop();
             HideHighlight();
             InvalidatePreview();
             _preview = parts;
             PreviewParts = parts.Count;
             _previewStrong = true;
-            _pendingWords = PageLayout.WordsOf(parts);
             InvalidatePreview();
             _previewTimer.Stop();
             _previewTimer.Start();
+            var words = PageLayout.Dedupe(PageLayout.WordsOf(parts));   // across blocks too: never a word twice
+            WordsReadyMs = (int)(DateTime.UtcNow - _releaseAt).TotalMilliseconds;
+            ReadWords(words);
         }
 
         private void CancelPreview()
         {
             _previewTimer.Stop();
-            _pendingWords = null;
             InvalidatePreview();
             _preview = null;
         }
@@ -319,13 +489,24 @@ namespace Rapcha.Win
         private void VoiceFailed(Exception e)
         {
             AppStorage.Log("Voice failed: " + e.GetType().Name + " " + e.Message);
-            _reader?.Dispose(); _reader = null;
+            if (_reader != null) _reader.Changed -= OnReaderChanged;
+            _reader = null;
+            Voices.ResetShared();
             _status = SpeechReader.CountVoices() == 0 ? "No Windows voice is installed." : "No speaker found. Check your sound output.";
         }
 
         private void OnReaderChanged()
         {
             if (_reader == null) return;
+            if (_waitFirstWord && _reader.Status == ReadState.Playing && _reader.AudioStartedAt != DateTime.MinValue && _reader.AudioStartedAt >= _releaseAt)
+            {
+                _waitFirstWord = false;
+                FirstWordMs = (int)(_reader.AudioStartedAt - _releaseAt).TotalMilliseconds;
+                MarkHot(800);   // the background index waits a little longer so the start stays smooth
+                AppStorage.Log("Overlay latency: mode=" + LastMode + " release_to_words_ms=" + WordsReadyMs + " release_to_audio_ms=" + FirstWordMs +
+                               " index=" + LastIndexState + " passes=" + (_ocr?.Passes.Count ?? 0) + " voice=" + (_reader is OneCoreReader ? "onecore" : "sapi") +
+                               " open_age_ms=" + (int)(_releaseAt - _openedAt).TotalMilliseconds);
+            }
             if (_spoken != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Paused))
             {
                 // The voice's word (it may say a code token as several words) maps back to the OCR word by position.
@@ -333,12 +514,6 @@ namespace Rapcha.Win
                 var plan = _reader.Plan;
                 int ocrWord = plan != null && cw >= 0 && cw < plan.Words.Count ? _spoken.WordAtChar(plan.Words[cw].Start) : Math.Max(0, cw);
                 var target = _spoken.HighlightFor(ocrWord);
-                if (_waitFirstWord && _reader.Status == ReadState.Playing)
-                {
-                    _waitFirstWord = false;
-                    FirstWordMs = (int)(DateTime.UtcNow - _releaseAt).TotalMilliseconds;
-                    AppStorage.Log("Overlay first word: ms=" + FirstWordMs);
-                }
                 if (!_hlVisible || !SameBox(target, _hlTarget))
                 {
                     _hlFrom = _hlVisible ? _hl : target;
@@ -352,7 +527,7 @@ namespace Rapcha.Win
             else if (_reader.Status == ReadState.Finished || _reader.Status == ReadState.Idle)
             {
                 HideHighlight();
-                if (!Previewing) { InvalidatePreview(); _preview = null; }
+                if (!Previewing && _reader.Status == ReadState.Finished) { InvalidatePreview(); _preview = null; }
                 if (_reader.Status == ReadState.Finished && _status == LastReadText) _status = ""; // a spoken message is done
             }
             InvalidateBottom();
@@ -383,7 +558,7 @@ namespace Rapcha.Win
 
         private bool Reading => _reader != null && (_reader.Status == ReadState.Playing || _reader.Status == ReadState.Paused);
 
-        // ---------------- Input ----------------
+        // ---------------- Input: the three gestures (see BoxSelector) ----------------
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -391,7 +566,7 @@ namespace Rapcha.Win
             switch (e.KeyCode)
             {
                 case Keys.Escape:
-                    if (_selector.WaitingForSecondCorner) { _selector.Cancel(); InvalidateBox(); }
+                    if (_selector.Busy) CancelGesture();   // Esc cancels corner 1 (or a pending tap / drag) first
                     else Close();
                     break;
                 case Keys.Space: Use(Control.PlayPause); break;
@@ -400,24 +575,41 @@ namespace Rapcha.Win
             }
         }
 
+        private void CancelGesture()
+        {
+            bool wasCorner = _selector.WaitingForSecondCorner;
+            _selector.Cancel();
+            _tapTimer.Stop();
+            DropTapPrep();
+            if (wasCorner) AppStorage.Log("Overlay gesture: corners cancelled");
+            InvalidateBox();
+            InvalidateBottom();
+        }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Right) { _selector.Cancel(); InvalidateBox(); return; }
+            if (e.Button == MouseButtons.Right) { if (_selector.Busy) CancelGesture(); return; }
             if (e.Button != MouseButtons.Left) return;
-            _pressed = HitControl(e.Location);
-            if (_pressed != Control.None) return;
-            _selector.OnDown(e.X, e.Y);
-            InvalidateBox();
+            if (!_selector.WaitingForSecondCorner)
+            {
+                _pressed = HitControl(e.Location);
+                if (_pressed != Control.None) return;
+            }
+            Selection(_selector.OnDown(e.X, e.Y, Now()));
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            Cursor = HitControl(e.Location) != Control.None ? Cursors.Hand : Cursors.Cross;
+            var c = HitControl(e.Location) != Control.None && !_selector.WaitingForSecondCorner ? Cursors.Hand : Cursors.Cross;
+            if (Cursor != c) Cursor = c;
             if (_pressed != Control.None) return;
-            _selector.OnMove(e.X, e.Y);
-            if (_selector.HasLiveBox) InvalidateBox();
+            var before = _selector.Current;
+            var r = _selector.OnMove(e.X, e.Y, Now());
+            if (r.Kind != BoxSelector.Kind.None) Selection(r);
+            else if (_selector.HasLiveBox) InvalidateBox();   // the box follows in place (double-buffered, no blink)
+            if (_selector.Current != before) InvalidateBottom();
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -431,75 +623,86 @@ namespace Rapcha.Win
                 if (HitControl(e.Location) == c) Use(c);
                 return;
             }
-            Selection(_selector.OnUp(e.X, e.Y, WordNear(e.X, e.Y)));
+            _boxMode = _selector.WaitingForSecondCorner ? "corners" : "box";
+            Selection(_selector.OnUp(e.X, e.Y, Now()));
         }
 
-        private bool? WordNear(double x, double y)
-        {
-            var page = CurrentPage;
-            if (page == null) return null;
-            return page.NearestLine(x, y, S(3)) != null;   // a word right under the click; else look closer (TapPatch)
-        }
+        private string _boxMode = "box";
 
         private void Selection(BoxSelector.Result r)
         {
-            InvalidateBox();
-            if (r.Kind == BoxSelector.Kind.Box || r.Kind == BoxSelector.Kind.TapWord) { _releaseAt = DateTime.UtcNow; _waitFirstWord = true; FirstWordMs = -1; }
             switch (r.Kind)
             {
-                case BoxSelector.Kind.Box:
-                    AppStorage.Log("Overlay box: " + (int)r.Box.W + "x" + (int)r.Box.H);
-                    ReadBox(r.Box);
-                    break;
-                case BoxSelector.Kind.TapWord:
-                    ReadLine(CurrentPage.NearestLine(r.X, r.Y, TapRadius));
+                case BoxSelector.Kind.TapPending:
+                    PrepareTap(r.X, r.Y);
+                    _tapTimer.Stop(); _tapTimer.Start();
                     break;
                 case BoxSelector.Kind.CornerSet:
-                    _selGen++;
-                    _releaseAt = DateTime.UtcNow; _waitFirstWord = true; FirstWordMs = -1;
-                    if (CurrentPage == null) _pendingTap = (r.X, r.Y); // decide once OCR is ready: a word means "read its line"
-                    else TapPatch(r.X, r.Y);                          // nothing near: look closer before taking it as a corner
+                    _tapTimer.Stop();
+                    DropTapPrep();
+                    AppStorage.Log("Overlay gesture: corner 1 set");
+                    break;
+                case BoxSelector.Kind.Tap:
+                    _tapTimer.Stop();
+                    ReadTap(r.X, r.Y);
+                    break;
+                case BoxSelector.Kind.Box:
+                    _tapTimer.Stop();
+                    AppStorage.Log("Overlay box: mode=" + _boxMode + " " + (int)r.Box.W + "x" + (int)r.Box.H);
+                    InvalidateBox();
+                    StartBox(r.Box, _boxMode);
+                    break;
+                case BoxSelector.Kind.Cancelled:
+                    DropTapPrep();
                     break;
             }
+            InvalidateBox();
+            InvalidateBottom();
         }
 
-        // Self-test helpers: the same paths real input takes.
+        // Self-test helpers: the same state machine and paths real input takes (with synthetic times).
         public void SimulateDrag(Box b)
         {
-            _selector.OnDown(b.X, b.Y);
-            _selector.OnMove(b.X + b.W / 2, b.Y + b.H / 2);
-            _selector.OnMove(b.Right, b.Bottom);
-            Selection(_selector.OnUp(b.Right, b.Bottom, WordNear(b.Right, b.Bottom)));
+            CancelGesture();
+            long t = Now();
+            Selection(_selector.OnDown(b.X, b.Y, t));
+            _selector.OnMove(b.X + b.W / 2, b.Y + b.H / 2, t + 20);
+            _selector.OnMove(b.Right, b.Bottom, t + 40);
+            _boxMode = "box";
+            Selection(_selector.OnUp(b.Right, b.Bottom, t + 60));
         }
 
-        /// <summary>Self-test: forget a pending first corner.</summary>
-        public void CancelCorner() { _selector.Cancel(); _selGen++; _pendingTap = null; InvalidateBox(); }
+        /// <summary>Self-test: forget a pending corner or tap.</summary>
+        public void CancelCorner() => CancelGesture();
 
-        /// <summary>Self-test: the next read creates the reader again (with the voice now saved in Settings).</summary>
+        /// <summary>Self-test: the next read uses the voice now saved in Settings (the shared reader is re-created).</summary>
         public void ResetVoice()
         {
-            if (_reader == null) return;
-            _reader.Changed -= OnReaderChanged;
-            try { _reader.Dispose(); } catch { }
+            if (_reader != null) { _reader.Changed -= OnReaderChanged; try { _reader.Stop(); } catch { } }
             _reader = null;
+            Voices.ResetShared();
         }
 
         public void SimulateTwoClicks(Box b)
         {
-            _selector.Cancel();
-            _selector.OnDown(b.X, b.Y);
-            var first = _selector.OnUp(b.X, b.Y, false);
-            if (first.Kind != BoxSelector.Kind.CornerSet) { Selection(first); return; }
-            _selector.OnMove(b.Right, b.Bottom);
-            _selector.OnDown(b.Right, b.Bottom);
-            Selection(_selector.OnUp(b.Right, b.Bottom, false));
+            CancelGesture();
+            long t = Now();
+            Selection(_selector.OnDown(b.X, b.Y, t));
+            Selection(_selector.OnUp(b.X, b.Y, t + 30));
+            Selection(_selector.OnMove(b.Right, b.Bottom, t + 120));   // moved within the tap window: corner 1 set
+            Selection(_selector.OnDown(b.Right, b.Bottom, t + 600));
+            _boxMode = "corners";
+            Selection(_selector.OnUp(b.Right, b.Bottom, t + 650));
         }
 
+        /// <summary>Self-test: a tap (the tap window is skipped; latency is from this call).</summary>
         public void SimulateTap(double x, double y)
         {
-            _selector.Cancel();
-            _selector.OnDown(x, y);
-            Selection(_selector.OnUp(x, y, WordNear(x, y)));
+            CancelGesture();
+            long t = Now();
+            Selection(_selector.OnDown(x, y, t));
+            Selection(_selector.OnUp(x, y, t + 40));
+            Selection(_selector.Tick(t + 40 + BoxSelector.TapWindowMs));
         }
 
         // ---------------- Painting ----------------
@@ -626,9 +829,7 @@ namespace Rapcha.Win
         private void DrawBottom(Graphics g)
         {
             _controls.Remove(Control.Back); _controls.Remove(Control.PlayPause); _controls.Remove(Control.Forward); _controls.Remove(Control.Stop);
-            string text = _status.Length > 0 ? _status
-                : _selector.WaitingForSecondCorner ? "Now click the other corner of the box."
-                : "Drag a box around text to read it (or click two corners, or tap a word). Esc to close.";
+            string text = ModeText();
             bool controls = Reading || (_reader != null && _reader.Status == ReadState.Paused);
             float pad = S(18), h = S(48), btn = S(36), gap = S(10);
             var size = g.MeasureString(text, _font);
@@ -655,6 +856,16 @@ namespace Rapcha.Win
             using (var b = new SolidBrush(Color.FromArgb(240, 240, 244)))
             using (var sf = new StringFormat(StringFormatFlags.NoWrap) { Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Center })
                 g.DrawString(controls ? "Reading…" : text, _font, b, new RectangleF(x, pill.Y, pill.Right - x - pad, h), sf);
+        }
+
+        /// <summary>The mode indicator on the floating pill.</summary>
+        public string ModeText()
+        {
+            if (_status.Length > 0) return _status;
+            if (_selector.WaitingForSecondCorner) return "Corner 1 set: move and click again";
+            if (_selector.Current == BoxSelector.State.Dragging) return "Release to read";
+            if (Previewing && _selector.Current != BoxSelector.State.TapPending) return "Reading…";
+            return "Tap to read · drag a box · or click, move, click. Esc closes.";
         }
 
         private void DrawClose(Graphics g)
@@ -729,9 +940,12 @@ namespace Rapcha.Win
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _closing = true;
             _anim.Stop();
             _previewTimer.Stop();
-            if (_reader != null) { _reader.Changed -= OnReaderChanged; _reader.Dispose(); _reader = null; }
+            _tapTimer.Stop();
+            // The reader is shared for the app's lifetime: stop it and let go, never dispose it here.
+            if (_reader != null) { _reader.Changed -= OnReaderChanged; try { _reader.Stop(); } catch { } _reader = null; }
             base.OnFormClosed(e);
         }
 
@@ -739,8 +953,10 @@ namespace Rapcha.Win
         {
             if (disposing)
             {
+                _closing = true;
                 _anim.Dispose();
                 _previewTimer.Dispose();
+                _tapTimer.Dispose();
                 _dark.Dispose();
                 _font.Dispose();
                 _small.Dispose();

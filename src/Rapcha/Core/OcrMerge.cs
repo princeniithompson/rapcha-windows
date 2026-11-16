@@ -12,6 +12,7 @@ namespace Rapcha.Core
         public int Priority;                 // tie-break: higher wins (0 = plain colour pass)
         public Box Area;                     // the part of the screen this pass looked at
         public int Ms;
+        public int MergeMs = -1;             // the background index: merging everything so far took this long
         public readonly List<List<OcrWord>> Lines = new List<List<OcrWord>>();
         public int WordCount => Lines.Sum(l => l.Count);
     }

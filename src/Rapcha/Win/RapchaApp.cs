@@ -124,6 +124,10 @@ namespace Rapcha.Win
 
             Uia.WarmUp();
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
+            // Select to speak keeps one primed voice for the app's lifetime, so no selection waits for an engine to start.
+            var prime = new Timer { Interval = 2500 };
+            prime.Tick += (s, e) => { prime.Stop(); prime.Dispose(); Voices.PrimeShared(_selfTestOcr != null); };
+            prime.Start();
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (_selfTestRing) { RunRingSelfTest(); return; }
             if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
@@ -540,23 +544,10 @@ namespace Rapcha.Win
             AppStorage.Log("Overlay open: " + bounds.Width + "x" + bounds.Height + " dpi=" + dpi + " screens=" + Screen.AllScreens.Length +
                            " glow_windows=" + _glow.WindowCount + " capture_ms=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
 
-            Task<OcrService.Result> ocr;
-            try { ocr = OcrService.RecognizeAsync(overlay.Source, dpi); } // the overlay keeps a copy of the pixels
+            // The index starts now (fast first look, then the rest in the background) while the user positions.
+            try { overlay.StartIndex(); }   // the overlay keeps its own copy of the pixels
             finally { shot.Dispose(); }
-            ocr.ContinueWith(t =>
-            {
-                var r = t.Status == TaskStatus.RanToCompletion ? t.Result : new OcrService.Result { Problem = "Couldn't read the screen. Try again." };
-                try
-                {
-                    _ring.BeginInvoke(new Action(() =>
-                    {
-                        if (gen != _overlayGeneration || _overlay != overlay || overlay.IsDisposed) return;
-                        overlay.SetOcr(r);
-                        _ring.KeepOnTop();
-                    }));
-                }
-                catch { }
-            });
+            _ring.KeepOnTop();
         }
 
         /// <summary>Closes the overlay (if open) and gives focus back. Returns the window that had focus before it.</summary>
@@ -616,7 +607,11 @@ namespace Rapcha.Win
             {
                 var text = _overlay.LastReadText;
                 bool all = expected.All(w => text.IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0);
-                bool second = text.IndexOf("second", StringComparison.OrdinalIgnoreCase) >= 0;
+                // v14: a tap reads the tapped paragraph from its start (both Notepad lines are one paragraph);
+                // a box reads only the lines it touches, so the second line must not be read then.
+                bool tap = how == "tap";
+                bool second = !tap && text.IndexOf("second", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (tap && !text.TrimStart().StartsWith("The quick", StringComparison.OrdinalIgnoreCase)) second = true;
                 var r = _overlay.Reader;
                 AppStorage.Log("Selftest ocr: " + how + " expected_found=" + all + " second_line_read=" + second + " words=" + r.Plan.Words.Count +
                                " progress_events=" + r.ProgressEvents + " last_word=" + r.CurrentWord + " highlight_moves=" + _overlay.HighlightMoves + " voice=\"" + r.VoiceName + "\"");

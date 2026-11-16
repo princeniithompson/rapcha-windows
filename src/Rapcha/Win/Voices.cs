@@ -112,6 +112,45 @@ namespace Rapcha.Win
             });
         }
 
+        private static IReadAloud _shared;
+        private static string _sharedKey;
+
+        /// <summary>
+        /// The one reader select to speak uses for the app's lifetime (UI thread only): created once, primed, and
+        /// reused by every overlay, so no selection ever waits for a voice engine to start. Re-created only when
+        /// the voice chosen in Settings changes.
+        /// </summary>
+        public static IReadAloud Shared(bool silent)
+        {
+            string id = SavedId;
+            string key = id + "|" + silent;
+            if (_shared != null && key == _sharedKey) return _shared;
+            var t0 = DateTime.UtcNow;
+            if (_shared != null) { try { _shared.Dispose(); } catch { } }
+            _shared = CreateReader(silent, id);
+            _sharedKey = key;
+            AppStorage.Log("Voices: reader created (" + (_shared is OneCoreReader ? "onecore" : "sapi") + ") ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
+            return _shared;
+        }
+
+        /// <summary>Creates (if needed) and primes the shared reader: engine loaded, output open, no sound.</summary>
+        public static void PrimeShared(bool silent)
+        {
+            var t0 = DateTime.UtcNow;
+            try { Shared(silent).Prime(); }
+            catch (Exception e) { AppStorage.Log("Voices: prime failed (" + e.GetType().Name + ")"); return; }
+            int ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            if (ms > 5) AppStorage.Log("Voices: primed ms=" + ms);
+        }
+
+        /// <summary>Forgets the shared reader (a voice failed, or a self-test changed the voice).</summary>
+        public static void ResetShared()
+        {
+            if (_shared != null) { try { _shared.Dispose(); } catch { } }
+            _shared = null;
+            _sharedKey = null;
+        }
+
         public static IReadAloud CreateReader(bool silent, string id = null)
         {
             id = id ?? SavedId;

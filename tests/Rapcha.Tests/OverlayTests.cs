@@ -105,9 +105,9 @@ namespace Rapcha.Tests
         public void DragMakesABox()
         {
             var b = new BoxSelector();
-            b.OnDown(10, 10); b.OnMove(40, 30);
+            b.OnDown(10, 10, 0); b.OnMove(40, 30, 20);
             Assert.True(b.HasLiveBox);
-            var r = b.OnUp(120, 60, false);
+            var r = b.OnUp(120, 60, 60);
             Assert.Equal(BoxSelector.Kind.Box, r.Kind);
             Assert.Equal(10, r.Box.X); Assert.Equal(110, r.Box.W); Assert.Equal(50, r.Box.H);
         }
@@ -116,57 +116,10 @@ namespace Rapcha.Tests
         public void TinyMovementIsATap()
         {
             var b = new BoxSelector();
-            b.OnDown(10, 10); b.OnMove(14, 13);
+            b.OnDown(10, 10, 0); b.OnMove(14, 13, 10);
             Assert.False(b.HasLiveBox);
-            Assert.Equal(BoxSelector.Kind.TapWord, b.OnUp(14, 13, true).Kind);
-        }
-
-        [Fact]
-        public void TwoClicksMakeABoxWithoutHolding()
-        {
-            var b = new BoxSelector();
-            b.OnDown(300, 300);
-            Assert.Equal(BoxSelector.Kind.CornerSet, b.OnUp(300, 300, false).Kind);
-            Assert.True(b.WaitingForSecondCorner);
-            b.OnMove(420, 380);                       // the box follows the pointer between clicks
-            Assert.Equal(120, b.LiveBox.W);
-            b.OnDown(450, 400);
-            var r = b.OnUp(450, 400, true);           // even if the second click lands on a word
-            Assert.Equal(BoxSelector.Kind.Box, r.Kind);
-            Assert.Equal(300, r.Box.X); Assert.Equal(150, r.Box.W); Assert.Equal(100, r.Box.H);
-        }
-
-        [Fact]
-        public void SecondClickOnTheSameSpotCancels()
-        {
-            var b = new BoxSelector();
-            b.OnDown(50, 50); b.OnUp(50, 50, false);
-            b.OnDown(52, 51);
-            Assert.Equal(BoxSelector.Kind.Cancelled, b.OnUp(52, 51, false).Kind);
-            Assert.False(b.HasLiveBox);
-        }
-
-        [Fact]
-        public void UnknownWordTapCanBecomeACornerLater()
-        {
-            var b = new BoxSelector();
-            b.OnDown(50, 50);
-            var r = b.OnUp(50, 50, null);
-            Assert.Equal(BoxSelector.Kind.CornerSet, r.Kind); // decided as a corner; the overlay may still read a word once OCR is ready
-            b.Cancel();
-            b.SetCorner(60, 60);
-            Assert.True(b.WaitingForSecondCorner);
-        }
-
-        [Fact]
-        public void DragStartedFromAPendingCornerStillWorks()
-        {
-            var b = new BoxSelector();
-            b.OnDown(0, 0); b.OnUp(0, 0, false);      // corner set
-            b.OnDown(10, 10); b.OnMove(200, 100);
-            var r = b.OnUp(200, 100, false);
-            Assert.Equal(BoxSelector.Kind.Box, r.Kind);
-            Assert.Equal(0, r.Box.X); Assert.Equal(200, r.Box.W);
+            Assert.Equal(BoxSelector.Kind.TapPending, b.OnUp(14, 13, 30).Kind);
+            Assert.Equal(BoxSelector.Kind.Tap, b.Tick(30 + BoxSelector.TapWindowMs).Kind);
         }
     }
 }

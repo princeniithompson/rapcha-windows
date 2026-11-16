@@ -23,6 +23,8 @@ namespace Rapcha.Win
         public ReadState Status { get; private set; } = ReadState.Idle;
         public int ProgressEvents { get; private set; }
         public string VoiceName { get; private set; } = "";
+        public DateTime AudioStartedAt { get; private set; } = DateTime.MinValue;
+        private bool _primed;
 
         public event Action Changed;
 
@@ -52,6 +54,24 @@ namespace Rapcha.Win
             _synth.SpeakCompleted += OnCompleted;
             return _synth;
         }
+
+        /// <summary>Creates the synthesizer and opens the output with a silent 1 ms prompt (loads the voice too).</summary>
+        public void Prime()
+        {
+            var synth = Synth();
+            if (_primed) return;
+            _primed = true;
+            try
+            {
+                var pb = new PromptBuilder();
+                pb.AppendBreak(TimeSpan.FromMilliseconds(1));
+                synth.SpeakAsync(new Prompt(pb));   // not _prompt: its events are ignored
+            }
+            catch (Exception e) { AppStorage.Log("Voice prime failed: " + e.GetType().Name); }
+        }
+
+        /// <summary>SAPI starts speaking within a few ms once primed: nothing to prepare ahead.</summary>
+        public void Prepare(string text) { }
 
         /// <summary>Replaces whatever is being read with new text, from its first word.</summary>
         public void Read(string text, int startWord = 0)
@@ -101,6 +121,7 @@ namespace Rapcha.Win
             CancelPrompt();
             CurrentWord = word;
             _baseChar = Plan.Words[word].Start;
+            AudioStartedAt = DateTime.MinValue;
             var synth = Synth();
             synth.Rate = VoiceSettings.SapiRate;
             _prompt = synth.SpeakAsync(Plan.TextFrom(word));
@@ -124,6 +145,7 @@ namespace Rapcha.Win
         private void OnProgress(object sender, SpeakProgressEventArgs e)
         {
             if (e.Prompt != _prompt || Plan == null) return;
+            if (AudioStartedAt == DateTime.MinValue) AudioStartedAt = DateTime.UtcNow; // the first word is being spoken
             ProgressEvents++;
             CurrentWord = Plan.WordAtChar(_baseChar + e.CharacterPosition);
             Changed?.Invoke();

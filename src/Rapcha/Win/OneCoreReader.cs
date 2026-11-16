@@ -21,7 +21,9 @@ namespace Rapcha.Win
         private readonly bool _silent;
         private SpeechSynthesizer _synth;
         private WaveOutPlayer _player;
-        private readonly System.Windows.Forms.Timer _tick = new System.Windows.Forms.Timer { Interval = 30 };
+        private WaveOutPlayer _nextPlayer;   // the next piece, already opened, so it starts the moment this one ends
+        private Chunk _nextChunk;
+        private readonly System.Windows.Forms.Timer _tick = new System.Windows.Forms.Timer { Interval = 15 };
         private int _gen;
         private int _baseChar;
         private double[] _cueMs = new double[0];
@@ -34,7 +36,16 @@ namespace Rapcha.Win
         public string VoiceName { get; }
         public bool UsedWordCues { get; private set; }
         public int LastCueCount { get; private set; }
+        public DateTime AudioStartedAt { get; private set; } = DateTime.MinValue;
+        /// <summary>Gap between the end of one piece and the start of the next, ms (largest in the current read).</summary>
+        public int MaxPieceGapMs { get; private set; }
         public event Action Changed;
+
+        // A piece prepared ahead (Prepare) for text that may be read next.
+        private string _prepText;
+        private ReadingPlan _prepPlan;
+        private Task<Chunk> _prepTask;
+        private bool _primed;
 
         public OneCoreReader(VoiceInformation voice, bool silentOutput = false)
         {
@@ -52,13 +63,37 @@ namespace Rapcha.Win
             return _synth;
         }
 
+        public void Prime()
+        {
+            var synth = Synth();
+            if (_primed) return;
+            _primed = true;
+            // The first synthesis loads the voice data: do it now, quietly, and throw the audio away.
+            synth.SynthesizeTextToStreamAsync(".").AsTask().ContinueWith(t => { try { t.Result?.Dispose(); } catch { } });
+        }
+
+        public void Prepare(string text)
+        {
+            if (string.IsNullOrEmpty(text)) { _prepText = null; _prepTask = null; return; }
+            if (text == _prepText && _prepTask != null) return;
+            var plan = ReadingPlan.Create(text);
+            if (plan.IsEmpty) return;
+            _prepText = text;
+            _prepPlan = plan;
+            _prepTask = Synthesize(plan, 0, ChunkEnd(plan, 0, FirstChunkWords));
+            _prepTask.ContinueWith(t => { var x = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+        }
+
         public void Read(string text, int startWord = 0)
         {
-            Plan = ReadingPlan.Create(text);
+            Task<Chunk> ready = null;
+            if (text == _prepText && _prepTask != null && startWord == 0 && !_prepTask.IsFaulted) { Plan = _prepPlan; ready = _prepTask; }
+            else Plan = ReadingPlan.Create(text);
+            _prepText = null; _prepTask = null; _prepPlan = null;
             CurrentWord = 0;
             ProgressEvents = 0;
             if (Plan.IsEmpty) { Stop(); return; }
-            _ = StartAt(Plan.Skip(0, startWord));
+            _ = StartAt(Plan.Skip(0, startWord), ready);
         }
 
         public void TogglePause()
@@ -99,6 +134,8 @@ namespace Rapcha.Win
         {
             _tick.Stop();
             if (_player != null) { try { _player.Dispose(); } catch { } _player = null; }
+            if (_nextPlayer != null) { try { _nextPlayer.Dispose(); } catch { } _nextPlayer = null; }
+            _nextChunk = null;
         }
 
         private sealed class Chunk
@@ -109,31 +146,37 @@ namespace Rapcha.Win
             public double[] CueMs;
             public int[] CueChar;           // relative to BaseChar
             public bool Cues;
+            public bool Last;
         }
 
         /// <summary>The first piece is short so speech starts fast; later pieces are longer.</summary>
-        public const int FirstChunkWords = 8, ChunkWords = 40;
+        public const int FirstChunkWords = 6, ChunkWords = 24;
         private Task<Chunk> _next;
         private int _chunkEnd;
 
         /// <summary>Plan words [first, end) for the piece starting at first: whole phrases, at least minWords.</summary>
-        private int ChunkEnd(int first, int minWords)
+        private int ChunkEnd(int first, int minWords) => ChunkEnd(Plan, first, minWords);
+
+        /// <summary>Pieces end at a phrase end (sentence or line), so no word is ever cut or said twice.</summary>
+        private static int ChunkEnd(ReadingPlan plan, int first, int minWords)
         {
             int end = first;
-            foreach (var ph in Plan.Phrases)
+            foreach (var ph in plan.Phrases)
             {
                 if (ph.EndWord <= first) continue;
                 end = ph.EndWord;
                 if (end - first >= minWords) break;
             }
-            return Math.Max(first + 1, Math.Min(Plan.Words.Count, end));
+            return Math.Max(first + 1, Math.Min(plan.Words.Count, end));
         }
 
-        private async Task<Chunk> Synthesize(int first, int end)
+        private Task<Chunk> Synthesize(int first, int end) => Synthesize(Plan, first, end);
+
+        private async Task<Chunk> Synthesize(ReadingPlan plan, int first, int end)
         {
-            var c = new Chunk { First = first, End = end, BaseChar = Plan.Words[first].Start };
-            int endChar = Plan.Words[end - 1].End;
-            string text = Plan.Text.Substring(c.BaseChar, endChar - c.BaseChar);
+            var c = new Chunk { First = first, End = end, BaseChar = plan.Words[first].Start, Last = end >= plan.Words.Count };
+            int endChar = plan.Words[end - 1].End;
+            string text = plan.Text.Substring(c.BaseChar, endChar - c.BaseChar);
             var cueMs = new List<double>();
             var cueChar = new List<int>();
             var synth = Synth();
@@ -162,22 +205,27 @@ namespace Rapcha.Win
                     reader.ReadBytes(c.Wav);
                 }
             }
+            // Trim the engine's silence: less wait before the first word, and no gap between pieces.
+            c.Wav = WavTrim.Trim(c.Wav, true, 15, c.Last ? 250 : 40, out double lead);
+            if (lead > 0) for (int i = 0; i < cueMs.Count; i++) cueMs[i] = Math.Max(0, cueMs[i] - lead);
             c.Cues = cueMs.Count > 0;
             c.CueMs = cueMs.ToArray();
             c.CueChar = cueChar.ToArray();
             return c;
         }
 
-        private async Task StartAt(int word)
+        private async Task StartAt(int word, Task<Chunk> ready = null)
         {
             int gen = ++_gen;
             StopPlayer();
             _next = null;
             CurrentWord = word;
+            AudioStartedAt = DateTime.MinValue;
+            MaxPieceGapMs = 0;
             Status = ReadState.Preparing;
             Changed?.Invoke();
             Chunk first;
-            try { first = await Synthesize(word, ChunkEnd(word, FirstChunkWords)); }
+            try { first = await (ready ?? Synthesize(word, ChunkEnd(word, FirstChunkWords))); }
             catch (Exception e)
             {
                 if (gen != _gen) return;
@@ -190,9 +238,9 @@ namespace Rapcha.Win
             Play(first);
         }
 
-        private void Play(Chunk c)
+        private void Play(Chunk c, WaveOutPlayer opened = null)
         {
-            try { _player = new WaveOutPlayer(c.Wav, _silent); }
+            try { _player = opened ?? new WaveOutPlayer(c.Wav, _silent); }
             catch (Exception e)
             {
                 AppStorage.Log("OneCore playback failed: " + e.Message);
@@ -222,6 +270,7 @@ namespace Rapcha.Win
             }
             else _next = null;
             _player.Play();
+            if (AudioStartedAt == DateTime.MinValue) AudioStartedAt = DateTime.UtcNow;
             Status = ReadState.Playing;
             Changed?.Invoke();
             _tick.Start();
@@ -238,16 +287,30 @@ namespace Rapcha.Win
                 int w = Plan.WordAtChar(_baseChar + _cueChar[i]);
                 if (w != CurrentWord || ProgressEvents == 0) { CurrentWord = w; ProgressEvents++; Changed?.Invoke(); }
             }
+            // Open the next piece as soon as it is synthesized, so switching costs nothing.
+            if (_next != null && _nextPlayer == null && _next.IsCompleted)
+            {
+                if (_next.Status == TaskStatus.RanToCompletion)
+                {
+                    try { _nextChunk = _next.Result; _nextPlayer = new WaveOutPlayer(_nextChunk.Wav, _silent); }
+                    catch (Exception e) { AppStorage.Log("OneCore playback failed (next piece): " + e.GetType().Name); _nextChunk = null; _nextPlayer = null; _next = null; }
+                }
+                else _next = null;
+            }
+            bool ending = _player.Done || _player.PositionMs >= _player.DurationMs - 8;
+            if (ending && _nextPlayer != null)
+            {
+                var c = _nextChunk; var p = _nextPlayer;
+                _nextChunk = null; _nextPlayer = null; _next = null;
+                if (_player.Done) MaxPieceGapMs = Math.Max(MaxPieceGapMs, _tick.Interval); // at most one tick late
+                try { _player.Dispose(); } catch { }
+                _player = null;
+                Play(c, p);
+                return;
+            }
             if (_player.Done)
             {
-                if (_next != null)
-                {
-                    if (!_next.IsCompleted) return;               // the next piece is nearly ready: keep waiting
-                    var next = _next;
-                    _next = null;
-                    StopPlayer();
-                    if (next.Status == TaskStatus.RanToCompletion) { Play(next.Result); return; }
-                }
+                if (_next != null) return;                        // the next piece is nearly ready: keep waiting
                 StopPlayer();
                 CurrentWord = Plan.Words.Count - 1;
                 Status = ReadState.Finished;

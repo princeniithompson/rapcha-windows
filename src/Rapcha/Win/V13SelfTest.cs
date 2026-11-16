@@ -225,6 +225,9 @@ namespace Rapcha.Win
                     var full = await OcrService.RecognizeAsync(overlay.Source, dpi);
                     if (full.Problem.Length > 0) { Log("OCR problem"); return 60; }
                     overlay.SetOcr(full);
+                    // v14 reads from the screen index; recall is measured once every background pass is merged.
+                    bool indexed = await WaitFor(() => overlay.IndexReady, 90000);
+                    Log("index ready=" + indexed + " open_to_index_ms=" + overlay.IndexMs + " passes=" + overlay.Ocr.Passes.Count);
                     Log("full passes=" + full.Passes.Count + " ms=" + full.Ms + " words=" + full.Page.WordCount + " legacy_words=" + legacy.Page.WordCount +
                         " " + string.Join(",", full.Passes.Select(p => p.Name + ":" + p.WordCount + "w/" + p.Ms + "ms")));
 

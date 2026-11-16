@@ -58,12 +58,12 @@ namespace Rapcha.Tests
         }
 
         [Fact]
-        public void WordsOutsideTheBoxSidewaysAreNotRead()
+        public void HalfALineIsReadWhole()
         {
             var page = PageLayout.Analyze(Video());
-            // Half of the list's first line: only its words inside (with their cut word completed).
+            // v14: half of the list's first line reads the whole line (never a fragment).
             var text = Read(page, new Box(55, 245, 150, 25));
-            Assert.Equal("1. Just installed the", text);
+            Assert.Equal("1. Just installed the updated app on my Samsung phone", text);
         }
 
         [Fact]

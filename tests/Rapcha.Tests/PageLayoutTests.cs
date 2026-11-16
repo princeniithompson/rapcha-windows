@@ -133,10 +133,11 @@ namespace Rapcha.Tests
         }
 
         [Fact]
-        public void SmallBoxInsideAParagraphReadsTheWordsInIt()
+        public void SmallBoxInsideAParagraphReadsItsWholeLine()
         {
+            // v14 (like Android): a line the box touches is read whole, never cut at the box edge.
             var page = PageLayout.Analyze(Sidebar());
-            Assert.Equal("capable model", Read(page, new Box(1150, 178, 100, 18)));
+            Assert.Equal("Our most capable model for complex", Read(page, new Box(1150, 178, 100, 18)));
         }
 
         [Fact]

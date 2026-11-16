@@ -119,6 +119,75 @@ namespace Rapcha.Win
             });
         }
 
+        // ---------------- The screen index (v14) ----------------
+
+        /// <summary>
+        /// The fast first look at the whole screen: one colour pass, so the first box or tap can be read within a
+        /// fraction of a second of the overlay opening. Everything else is refined in the background (<see cref="IndexJobs"/>).
+        /// </summary>
+        public static Task<Result> FastAsync(FrameSource src, int dpi)
+        {
+            double scale = dpi >= 120 ? 1.0 : 1.5;
+            return Task.Run(() =>
+            {
+                var r = new Result { Scale = scale };
+                var t0 = DateTime.UtcNow;
+                try
+                {
+                    var probe = CreateEngine(false);
+                    if (probe == null) { r.Problem = NoLanguage; return r; }
+                    r.Language = probe.RecognizerLanguage?.LanguageTag ?? "";
+                    var p = RunPass(src, new Rectangle(0, 0, src.W, src.H), scale, Variant.Colour, false, "full-colour", 0);
+                    if (p != null) r.Passes.Add(p);
+                    Rebuild(r);
+                }
+                catch (Exception e) { Fail(r, e); }
+                r.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                return r;
+            });
+        }
+
+        /// <summary>
+        /// The background passes that complete the index, most useful first; the overlay runs them one at a time on a
+        /// low-priority thread and pauses them while a selection is being read. Together they cover what the v13
+        /// per-selection passes did: dark themes (norm), words dropped on long mixed lines (slices), small and
+        /// coloured text (enlarged colour and norm slices) and faint grey text (thresholded).
+        /// </summary>
+        public static List<(string name, Func<OcrPass> run)> IndexJobs(FrameSource src, int dpi, Action between = null)
+        {
+            double s1 = dpi >= 120 ? 1.0 : 1.5, s2 = dpi >= 120 ? 1.5 : 2.0;
+            var full = new Rectangle(0, 0, src.W, src.H);
+            int tile = TileWidth(dpi);
+            string X(double v) => v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "x";
+            var jobs = new List<(string, Func<OcrPass>)>
+            {
+                ("full-norm", () => RunPass(src, full, s1, Variant.Norm, false, "full-norm", 1)),
+                ("full-norm-tiles", () => TiledPass(src, full, s1, Variant.Norm, false, "full-norm-tiles", 2, tile, between)),
+                ("full-colour-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Colour, false, "full-colour-tiles-" + X(s2), 3, tile, between)),
+                ("full-norm-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Norm, false, "full-norm-tiles-" + X(s2), 3, tile, between)),
+                ("full-bin-tiles-" + X(s2), () => TiledPass(src, full, s2, Variant.Bin, false, "full-bin-tiles-" + X(s2), 2, tile, between)),
+            };
+            if (EnglishExtra()) jobs.Add(("full-norm-en", () => RunPass(src, full, s1, Variant.Norm, true, "full-norm-en", 1)));
+            return jobs;
+        }
+
+        /// <summary>
+        /// One quick pass over a small area (a selection made before the first look is back, or the patch around a
+        /// tap that found nothing): colour and norm, enlarged up to 2x.
+        /// </summary>
+        public static List<Task<OcrPass>> QuickPasses(FrameSource src, Box area)
+        {
+            var rect = Rectangle.Intersect(new Rectangle((int)Math.Floor(area.X), (int)Math.Floor(area.Y), (int)Math.Ceiling(area.W) + 1, (int)Math.Ceiling(area.H) + 1),
+                                           new Rectangle(0, 0, src.W, src.H));
+            var tasks = new List<Task<OcrPass>>();
+            if (rect.Width < 4 || rect.Height < 4) return tasks;
+            double px = (double)rect.Width * rect.Height;
+            double s = Math.Max(1.0, Math.Min(2.0, Math.Sqrt(2.0e6 / px)));
+            tasks.Add(Task.Run(() => RunPass(src, rect, s, Variant.Colour, false, "quick-colour", 3)));
+            tasks.Add(Task.Run(() => RunPass(src, rect, s, Variant.Norm, false, "quick-norm", 4)));
+            return tasks;
+        }
+
         /// <summary>A slower, sharper look at the whole screen (norm, 2x, tiled) for after the first result.</summary>
         public static Task<OcrPass> EnhanceAsync(FrameSource src, int dpi)
         {
@@ -229,7 +298,7 @@ namespace Rapcha.Win
         /// One variant run over overlapping vertical slices of the area (overlap = 40% of a slice, so any word up to
         /// that wide is whole in at least one slice); words touching a cut edge are left to the neighbouring slice.
         /// </summary>
-        public static OcrPass TiledPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority, int tileW)
+        public static OcrPass TiledPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority, int tileW, Action between = null)
         {
             var t0 = DateTime.UtcNow;
             var pass = new OcrPass { Name = name, Priority = priority, Area = new Box(rect.X, rect.Y, rect.Width, rect.Height) };
@@ -238,6 +307,7 @@ namespace Rapcha.Win
             for (int x = rect.X; ; x += step)
             {
                 int w = Math.Min(tileW, rect.Right - x);
+                between?.Invoke();   // the background index yields to a selection being read
                 var sub = new Rectangle(x, rect.Y, w, rect.Height);
                 var p = RunPass(src, sub, scale, v, english, name, priority);
                 if (p != null)

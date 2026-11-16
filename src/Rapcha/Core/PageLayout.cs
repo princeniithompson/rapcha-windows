@@ -88,6 +88,20 @@ namespace Rapcha.Core
                 if (kept.Any(k => string.Equals(k.Text, l.Text, StringComparison.OrdinalIgnoreCase) && IoU(k.Box, l.Box) >= 0.5)) continue;
                 kept.Add(l);
             }
+            // Words that sit on top of a word of a longer line (another pass or slice read the same spot) go:
+            // otherwise a box over both lines would say them twice.
+            var byLength = kept.OrderByDescending(l => l.Words.Count).ToList();
+            var placed = new List<OcrWord>();
+            var empty = new HashSet<TextLine>();
+            foreach (var l in byLength)
+            {
+                var keep = l.Words.Where(w => !placed.Any(p => Overlaps(p.Box, w.Box))).ToList();
+                if (keep.Count == l.Words.Count) { placed.AddRange(keep); continue; }
+                l.Words.Clear(); l.Words.AddRange(keep);
+                l.Box = keep.Aggregate(new Box(), (u, w) => u.Union(w.Box));
+                if (keep.Count == 0) empty.Add(l); else placed.AddRange(keep);
+            }
+            kept = kept.Where(l => !empty.Contains(l)).ToList();
             for (int i = 0; i < kept.Count; i++) kept[i].Id = i;
             page.Lines.AddRange(kept);
 
@@ -271,57 +285,123 @@ namespace Rapcha.Core
         /// Exception first: a box drawn tightly around whole lines (lines at least 90% inside whose own area fills
         /// at least 50% of the box) reads exactly those lines, even if that is half of a short paragraph.
         /// </summary>
-        // Selection rules (v13, see Snap).
+        // Selection rules (v14, see Snap).
         public const double LineVertical = 0.3;   // a line counts when the box covers at least 30% of its height
-        public const double WordHorizontal = 0.4; // a word counts when 40% of its width (or its centre) is inside
-        public const double CompleteLine = 0.75;  // a line whose text is 75% inside is completed
 
         /// <summary>
-        /// What a user's box reads, in reading order (blocks in page order: columns left to right, top to bottom;
-        /// lines top to bottom inside each block; words left to right).
-        /// - Never outside the box: a line takes part only when the box covers at least <see cref="LineVertical"/> of
-        ///   its height, and on such a line only words whose centre is inside the box's width (with a small
-        ///   tolerance) or that are at least <see cref="WordHorizontal"/> inside are read. A separate block above or
-        ///   below (a title) is never pulled in.
-        /// - Never a dropped line: every line that meets the rule above is read, however little of its block is in
-        ///   the box.
-        /// - Snap only expands inside the box's own lines: a cut word is read whole, and a line whose text is at
-        ///   least <see cref="CompleteLine"/> inside is read whole.
+        /// What a user's box reads (v14, like Android Select to Speak), in reading order: blocks in page order
+        /// (columns left to right, top to bottom), lines top to bottom inside each block, words left to right.
+        /// - Every visual line the box touches is read whole: the box must cover at least <see cref="LineVertical"/>
+        ///   of the line's height and reach its text sideways (a thin strip over the starts of a paragraph's lines is
+        ///   enough). The line is never cut at the box edge, so no word fragments.
+        /// - Nothing outside the box's lines: a block above or below (a title) is read only if one of its own lines is
+        ///   touched. Lines are split at column gaps first, so a strip in one column never reads the next column.
+        /// - Overlapping duplicates (the same word seen by several OCR passes or slices) are read once (<see cref="Dedupe"/>).
         /// </summary>
         public List<SnapPart> Snap(Box sel)
         {
             var parts = new List<SnapPart>();
-            if (sel.IsEmpty) return parts;
+            if (sel.W <= 0 && sel.H <= 0) return parts;   // a zero-width strip (a straight vertical drag) still counts
             foreach (var b in Blocks)
             {
-                if (b.Box.Intersect(sel.Inflate(2)).IsEmpty) continue;
                 SnapPart part = null;
                 int fullLines = 0;
                 double blockArea = 0, insideArea = 0;
                 foreach (var l in b.Lines) // already rows top to bottom, left to right
                 {
                     foreach (var w in l.Words) { blockArea += w.Box.Area; insideArea += w.Box.Intersect(sel).Area; }
-                    double vo = Math.Min(l.Box.Bottom, sel.Bottom) - Math.Max(l.Box.Y, sel.Y);
-                    if (l.Box.H <= 0 || vo < LineVertical * l.Box.H) continue;
-                    double tol = Math.Max(3, 0.3 * l.Box.H);
-                    var ws = l.Words.Where(w =>
-                        (w.Box.CenterX >= sel.X - tol && w.Box.CenterX <= sel.Right + tol) ||
-                        (w.Box.W > 0 && (Math.Min(w.Box.Right, sel.Right) - Math.Max(w.Box.X, sel.X)) >= WordHorizontal * w.Box.W)).ToList();
-                    if (ws.Count == 0) continue;
-                    double all = l.Words.Sum(w => w.Box.W), got = ws.Sum(w => w.Box.W);
-                    if (ws.Count < l.Words.Count && all > 0 && got >= CompleteLine * all) ws = l.Words.ToList();
-                    if (ws.Count == l.Words.Count) fullLines++;
+                    if (!Touches(l, sel)) continue;
+                    fullLines++;
                     if (part == null) part = new SnapPart { Block = b };
-                    part.Words.AddRange(ws.OrderBy(w => w.Box.X));
+                    part.Words.AddRange(l.Words.OrderBy(w => w.Box.X));
+                    part.Box = part.Box.Union(l.Box);
                 }
                 if (part == null) continue;
-                part.Kind = fullLines == b.Lines.Count ? SnapKind.Whole : part.Words.Count > 0 && fullLines > 0 ? SnapKind.Lines : SnapKind.Words;
+                part.Kind = fullLines == b.Lines.Count ? SnapKind.Whole : SnapKind.Lines;
                 part.AreaCoverage = blockArea > 0 ? insideArea / blockArea : 0;
                 part.LineCoverage = (double)fullLines / b.Lines.Count;
-                part.Box = part.Kind == SnapKind.Whole ? b.Box : part.Words.Aggregate(new Box(), (s, w) => s.Union(w.LineBox.IsEmpty ? w.Box : new Box(w.Box.X, w.LineBox.Y, w.Box.W, w.LineBox.H)));
+                var kept = Dedupe(part.Words);
+                part.Words.Clear(); part.Words.AddRange(kept);
+                if (part.Kind == SnapKind.Whole) part.Box = b.Box;
                 parts.Add(part);
             }
             return parts;
+        }
+
+        /// <summary>Does the box touch this line: enough of its height, and sideways anywhere over its text?</summary>
+        public static bool Touches(TextLine l, Box sel)
+        {
+            if (l.Box.H <= 0) return false;
+            double vo = Math.Min(l.Box.Bottom, sel.Bottom) - Math.Max(l.Box.Y, sel.Y);
+            bool within = sel.Y >= l.Box.Y && sel.Bottom <= l.Box.Bottom;   // a flat box drawn along the line itself
+            if (vo < LineVertical * l.Box.H && !within) return false;
+            double tol = Math.Max(2, 0.25 * l.Box.H);   // a strip just left of the first letter still counts
+            if (sel.Right < l.Box.X - tol || sel.X > l.Box.Right + tol) return false;
+            // Within the line's span, the box must reach a word (not only the gap between two far-apart words).
+            foreach (var w in l.Words)
+                if (sel.Right >= w.Box.X - tol && sel.X <= w.Box.Right + tol) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// The paragraph under a tap: the block holding the word nearest to the point (within maxDist), read from the
+        /// block's first line. Null when no word is that close.
+        /// </summary>
+        public SnapPart ParagraphAt(double x, double y, double maxDist)
+        {
+            var line = NearestLine(x, y, maxDist);
+            if (line == null) return null;
+            var b = BlockOf(line);
+            var part = new SnapPart { Block = b, Kind = SnapKind.Whole, AreaCoverage = 1, LineCoverage = 1 };
+            if (b == null) { part.Kind = SnapKind.Lines; part.Words.AddRange(Dedupe(line.Words)); part.Box = line.Box; return part; }
+            var words = new List<OcrWord>();
+            foreach (var l in b.Lines) words.AddRange(l.Words.OrderBy(w => w.Box.X));
+            part.Words.AddRange(Dedupe(words));
+            part.Box = b.Box;
+            return part;
+        }
+
+        /// <summary>
+        /// Drops OCR artifacts before speech: a word whose box mostly overlaps an earlier kept word on the same line
+        /// (the same word from two passes or two overlapping slices, even if read slightly differently), and a word
+        /// repeated right next to itself where the two boxes overlap or touch (a slice boundary seen twice).
+        /// A real repeat ("that that") has two separate boxes with a normal space between them and is kept.
+        /// </summary>
+        public static List<OcrWord> Dedupe(IEnumerable<OcrWord> words)
+        {
+            var kept = new List<OcrWord>();
+            foreach (var w in words)
+            {
+                bool dup = kept.Any(k => Overlaps(k.Box, w.Box));
+                if (!dup && kept.Count > 0)
+                {
+                    var k = kept[kept.Count - 1];
+                    string a = Plain(k.Text), b = Plain(w.Text);
+                    if (k.Line == w.Line && b.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+                    {
+                        double gap = w.Box.X - k.Box.Right;
+                        double h = Math.Max(1, Math.Min(k.Box.H, w.Box.H));
+                        dup = gap < 0.12 * h;
+                    }
+                }
+                if (!dup) kept.Add(w);
+            }
+            return kept;
+        }
+
+        /// <summary>Two word boxes are the same word when they overlap by at least half of the smaller one.</summary>
+        public static bool Overlaps(Box a, Box b)
+        {
+            double inter = a.Intersect(b).Area;
+            double small = Math.Min(a.Area, b.Area);
+            return small > 0 && inter >= 0.5 * small;
+        }
+
+        private static string Plain(string s)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (char c in s ?? "") if (char.IsLetterOrDigit(c)) sb.Append(c);
+            return sb.ToString();
         }
 
         /// <summary>The v12 snap rules (kept only so the self-test can measure before/after recall).</summary>
