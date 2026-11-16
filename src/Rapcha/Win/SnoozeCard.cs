@@ -49,8 +49,9 @@ namespace Rapcha.Win
             Card.RowCount = Card.Controls.Count;
             for (int i = 0; i < Card.RowCount; i++) Card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            foreach (var r in new[] { _m19, _h1, _h2, _custom }) r.CheckedChanged += (s, e) => { if (((RadioButton)s).Checked) Save(); };
-            _minutes.ValueChanged += (s, e) => { if (_loading) return; if (!_custom.Checked) { _loading = true; _custom.Checked = true; _loading = false; } Save(); };
+            // "Custom" sits in its own row (a different container), so the four options are kept exclusive by hand.
+            foreach (var r in new[] { _m19, _h1, _h2, _custom }) r.CheckedChanged += (s, e) => OnPicked((RadioButton)s);
+            _minutes.ValueChanged += (s, e) => { if (_loading) return; if (!_custom.Checked) _custom.Checked = true; else Save(); };
             Snooze.DurationChanged += OnExternal;
             Card.Disposed += (s, e) => Snooze.DurationChanged -= OnExternal;
             Load();
@@ -72,6 +73,16 @@ namespace Rapcha.Win
                 _status.Text = "Snooze lasts " + SnoozeDuration.Label(m) + ".";
             }
             finally { _loading = false; }
+        }
+
+        private void OnPicked(RadioButton picked)
+        {
+            if (!picked.Checked) return;
+            bool was = _loading;
+            _loading = true;
+            try { foreach (var r in new[] { _m19, _h1, _h2, _custom }) if (r != picked && r.Checked) r.Checked = false; }
+            finally { _loading = was; }
+            Save();
         }
 
         private void Save()
