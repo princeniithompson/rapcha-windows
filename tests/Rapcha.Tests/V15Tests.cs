@@ -35,6 +35,26 @@ namespace Rapcha.Tests
         }
 
         [Fact]
+        public void ALineWithoutDescendersStaysInItsParagraph()
+        {
+            // OCR boxes: a line with no g, p, q, y or j is shorter (its bottom is the baseline), so the gap to the
+            // next line looks bigger and the heights look different. It is still one paragraph per column.
+            var l = new OcrLayout();
+            l.AddLine(Words("Left column text sits close", 80, 413, 11, 7, 4));
+            l.AddLine(Words("Right column text beside it", 300, 413, 15, 7, 4));
+            l.AddLine(Words("to the right column here.", 80, 437, 15, 7, 4));
+            l.AddLine(Words("keeps its own outline too.", 300, 437, 15, 7, 4));
+            var page = PageLayout.Analyze(l);
+            Assert.True(page.Blocks.Count == 2, string.Join(" | ", page.Blocks.Select(b => string.Join(" / ", b.Lines.Select(x => x.Text + "@" + x.Box.X + "," + x.Box.Y + "," + x.Box.H)))));
+            Assert.All(page.Blocks, b => Assert.Equal(2, b.Lines.Count));
+            // A real heading (much bigger text, a clear gap) is still its own block.
+            var h = new OcrLayout();
+            h.AddLine(Words("Settings", 40, 40, 30, 14, 8));
+            h.AddLine(Words("Choose the voice that reads to you.", 40, 84, 15));
+            Assert.Equal(2, PageLayout.Analyze(h).Blocks.Count);
+        }
+
+        [Fact]
         public void OneSegmentPerHeadingParagraphAndListItem()
         {
             var page = PageLayout.Analyze(Page());

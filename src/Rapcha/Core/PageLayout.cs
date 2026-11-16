@@ -153,7 +153,7 @@ namespace Rapcha.Core
         {
             if (lines.Count == 0) return;
             if (lines.Count == 1 || depth > 40) { output.Add(lines); return; }
-            double h = Median(lines.Select(l => l.Box.H));
+            double h = Median(lines.Select(l => TextHeight(l)));
 
             // Columns: a vertical gutter through the whole region (tiny marks such as bullets don't block it).
             var gaps = XGaps(lines.Where(l => !l.Tiny).ToList(), ColumnGap * h);
@@ -171,7 +171,7 @@ namespace Rapcha.Core
             {
                 if (bands.Count == 0 || l.Box.Y - bottom > BlockGap * h) bands.Add(new List<TextLine>());
                 bands[bands.Count - 1].Add(l);
-                bottom = Math.Max(bottom, l.Box.Bottom);
+                bottom = Math.Max(bottom, l.Box.Bottom + TextHeight(l) - l.Box.H); // where its descenders would end
             }
             if (bands.Count <= 1) { output.Add(lines); return; }
 
@@ -251,9 +251,12 @@ namespace Rapcha.Core
                 {
                     var b = blocks[i];
                     var prev = last[i];
-                    double hPrev = prev.Box.H, hNow = l.Box.H;
+                    // A line with no descenders ("Left column text sits close") has a shorter box than the same
+                    // font with them; compare text sizes, not raw boxes, and measure the gap from where its
+                    // descenders would be.
+                    double hPrev = TextHeight(prev), hNow = TextHeight(l);
                     double h = Math.Max(1, Math.Min(hPrev, hNow));
-                    double gap = l.Box.Y - prev.Box.Bottom;
+                    double gap = l.Box.Y - prev.Box.Bottom - (HasDescender(prev) ? 0 : hPrev - prev.Box.H);
                     if (gap < -0.5 * h) continue;                                   // side by side: not one under the other
                     bool similar = Math.Max(hPrev, hNow) <= HeightRatio * Math.Min(hPrev, hNow);
                     bool overlapX = Math.Min(l.Box.Right, b.Box.Right) - Math.Max(l.Box.X, b.Box.X) > 0;
@@ -277,6 +280,12 @@ namespace Rapcha.Core
             }
             return blocks.OrderBy(b => b.Box.Y).ThenBy(b => b.Box.X).ToList();
         }
+
+        private const string Descenders = "gjpqyQ,;()[]{}|/@$_";
+        /// <summary>Does any letter of the line reach below the baseline?</summary>
+        internal static bool HasDescender(TextLine l) => l.Words.Any(w => w.Text != null && w.Text.IndexOfAny(Descenders.ToCharArray()) >= 0);
+        /// <summary>The line's box height as if it had descenders (about a quarter more), for comparing text sizes.</summary>
+        internal static double TextHeight(TextLine l) => HasDescender(l) || l.Words.Count == 0 ? l.Box.H : l.Box.H * 1.3;
 
         /// <summary>Is there a line vertically between a and b that overlaps both sideways?</summary>
         private static bool Between(List<TextLine> region, TextLine a, TextLine b)
