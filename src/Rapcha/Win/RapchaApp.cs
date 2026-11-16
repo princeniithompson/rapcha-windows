@@ -610,7 +610,7 @@ namespace Rapcha.Win
             var poll = new Timer { Interval = 150 };
             var deadline = new Timer { Interval = 120000 };
             deadline.Tick += (s, e) => { deadline.Stop(); poll.Stop(); AppStorage.Log("Selftest ocr: timed out at stage " + stage); SelfTestExit(1); };
-            void Fail(int code, string why) { poll.Stop(); deadline.Stop(); AppStorage.Log("Selftest ocr: FAIL " + why); SelfTestExit(code); }
+            void Fail(int code, string why) { poll.Stop(); deadline.Stop(); AppStorage.Log("Selftest ocr: FAIL " + why); OcrService.DebugDump(_overlay?.Ocr, "selftest-ocr-fail"); SelfTestExit(code); }
             bool Done() => !_overlay.Previewing && _overlay.Reader != null && _overlay.Reader.Status == ReadState.Finished;
             bool Check(string how)
             {

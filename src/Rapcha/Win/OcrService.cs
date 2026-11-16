@@ -174,6 +174,34 @@ namespace Rapcha.Win
             });
         }
 
+        /// <summary>
+        /// Self-test only (CI artifacts, never the log): every pass and the merged page with words and boxes.
+        /// Written only when RUNNER_TEMP is set (GitHub Actions) and a self-test asks for it.
+        /// </summary>
+        public static void DebugDump(Result r, string name)
+        {
+            try
+            {
+                var root = Environment.GetEnvironmentVariable("RUNNER_TEMP");
+                if (string.IsNullOrEmpty(root) || r == null) return;
+                var dir = System.IO.Path.Combine(root, "rapcha-shots", "ocr-debug");
+                System.IO.Directory.CreateDirectory(dir);
+                var sb = new System.Text.StringBuilder();
+                string B(Box b) => ((int)b.X) + "," + ((int)b.Y) + " " + ((int)b.W) + "x" + ((int)b.H);
+                foreach (var p in r.Passes)
+                {
+                    sb.AppendLine("== pass " + p.Name + " area=" + B(p.Area) + " ms=" + p.Ms + " words=" + p.WordCount);
+                    foreach (var l in p.Lines) sb.AppendLine("  " + string.Join(" ", l.Select(w => w.Text + "[" + B(w.Box) + "]")));
+                }
+                sb.AppendLine("== merged page lines");
+                foreach (var l in r.Page.Lines) sb.AppendLine("  #" + l.Id + " " + B(l.Box) + " | " + string.Join(" ", l.Words.Select(w => w.Text + "[" + B(w.Box) + "]")));
+                sb.AppendLine("== blocks");
+                foreach (var b in r.Page.Blocks) sb.AppendLine("  block " + b.Order + " " + B(b.Box) + " lines=" + string.Join(",", b.Lines.Select(l => l.Id)));
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, name + ".txt"), sb.ToString());
+            }
+            catch { }
+        }
+
         private static void Fail(Result r, Exception e)
         {
             r.Problem = e is COMException || e is TypeLoadException || e is PlatformNotSupportedException

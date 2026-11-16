@@ -443,7 +443,8 @@ namespace Rapcha.Core
                 {
                     double dx = Math.Max(0, Math.Max(w.Box.X - x, x - w.Box.Right));
                     double dy = Math.Max(0, Math.Max(w.Box.Y - y, y - w.Box.Bottom));
-                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    // Ties (a point inside two boxes) go to the word whose centre is nearer.
+                    double d = Math.Sqrt(dx * dx + dy * dy) + 1e-3 * Math.Sqrt(Math.Pow(w.Box.CenterX - x, 2) + Math.Pow(w.Box.CenterY - y, 2));
                     if (d < bestD) { bestD = d; best = l; }
                 }
             return bestD <= maxDist ? best : null;

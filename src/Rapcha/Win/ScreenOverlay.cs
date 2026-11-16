@@ -80,6 +80,7 @@ namespace Rapcha.Win
             _dpi = dpi;
             _silentVoice = silentVoice;
             Source = FrameSource.From(screenshot); // physical pixels, for the sharper passes on a selection
+            Voices.WarmUp();                        // so the first word is not held up by the voice starting cold
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
@@ -235,7 +236,8 @@ namespace Rapcha.Win
             var page = CurrentPage;
             if (page == null) { Say(_ocr != null && _ocr.Problem.Length > 0 ? _ocr.Problem : "Still reading the screen. Try again in a moment."); return; }
             var parts = page.Snap(box);
-            AppStorage.Log("Overlay region: passes=" + used + " wait_ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
+            AppStorage.Log("Overlay region: passes=" + used + " wait_ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds +
+                           " parts=" + string.Join(";", parts.Select(p => string.Join(",", p.Words.GroupBy(w => w.Line).Select(g => (int)g.First().LineBox.Y + "/" + (int)g.First().LineBox.H + ":" + g.Count())))));
             AppStorage.Log("Overlay snap: blocks=" + parts.Count + " " + string.Join(",", parts.Select(p => p.Kind.ToString()[0] + ":" + (int)(p.AreaCoverage * 100) + "%/" + (int)(p.LineCoverage * 100) + "%")) +
                            " words=" + parts.Sum(p => p.Words.Count));
             if (parts.Count == 0) { Say(NoTextThere); return; }

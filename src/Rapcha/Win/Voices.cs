@@ -77,6 +77,41 @@ namespace Rapcha.Win
         /// <summary>
         /// A reader for the chosen (or given) voice. A voice that is gone falls back to the Windows default.
         /// </summary>
+        private static int _warm;
+
+        /// <summary>
+        /// Loads the chosen voice's engine on a background thread (a throwaway synthesizer that speaks nothing
+        /// audible), so the reader created later on the UI thread starts at once. Once per process.
+        /// </summary>
+        public static void WarmUp()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _warm, 1) == 1) return;
+            var id = SavedId;
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                var t0 = DateTime.UtcNow;
+                try
+                {
+                    if (id.StartsWith("onecore:", StringComparison.Ordinal))
+                    {
+                        var key = id.Substring(8);
+                        var v = Windows.Media.SpeechSynthesis.SpeechSynthesizer.AllVoices.FirstOrDefault(x => x.Id == key);
+                        if (v != null)
+                            using (var s = new Windows.Media.SpeechSynthesis.SpeechSynthesizer { Voice = v })
+                            using (var st = await s.SynthesizeTextToStreamAsync(".").AsTask()) { }
+                    }
+                    using (var sapi = new System.Speech.Synthesis.SpeechSynthesizer())
+                    {
+                        sapi.SetOutputToNull();
+                        if (id.StartsWith("sapi:", StringComparison.Ordinal)) { try { sapi.SelectVoice(id.Substring(5)); } catch { } }
+                        sapi.Speak(".");
+                    }
+                    AppStorage.Log("Voices: warmed up in " + (int)(DateTime.UtcNow - t0).TotalMilliseconds + " ms");
+                }
+                catch (Exception e) { AppStorage.Log("Voices: warm-up failed (" + e.GetType().Name + ")"); }
+            });
+        }
+
         public static IReadAloud CreateReader(bool silent, string id = null)
         {
             id = id ?? SavedId;

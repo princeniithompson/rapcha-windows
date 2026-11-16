@@ -296,6 +296,8 @@ namespace Rapcha.Win
                         Log("onecore first_word_ms=" + oneMs + " voice_label=\"" + onecore.Label + "\"");
                     }
 
+                    OcrService.DebugDump(overlay.Ocr, "v13-after");
+                    OcrService.DebugDump(legacy, "v13-before");
                     SaveResultsImage(img, legacy.Page, overlay.Ocr.Page, results, pageBefore, pageAfter);
                     File.WriteAllLines(Path.Combine(_out, "ocr-recall.txt"), new[]
                     {
@@ -343,6 +345,7 @@ namespace Rapcha.Win
             var legacyWords = PageLayout.WordsOf(legacy.Page.SnapLegacy(box)).Select(w => w.Text).ToList();
             double before = OrderedRecall(expected, legacyWords), after = OrderedRecall(expected, words);
             Log(name + " done=" + done + " words=" + words.Count + " region_passes=" + overlay.RegionPassesUsed + " legacy_words=" + legacyWords.Count);
+            try { File.AppendAllText(Path.Combine(_out, "ocr-scenarios.txt"), name + " box=" + box + "\n  after:  " + string.Join(" ", words) + "\n  before: " + string.Join(" ", legacyWords) + "\n"); } catch { }
             return (before, after, overlay.FirstWordMs, words, boxes);
         }
 
