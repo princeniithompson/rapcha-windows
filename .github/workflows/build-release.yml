@@ -149,6 +149,25 @@ jobs:
           "## v13 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v13 self-test failed ($code)" }
 
+      - name: v14 self-test (real injected mouse input; thin strip reads full lines; tap reads the paragraph; two corners with a pause; Esc; flicker frames; latency cold and warm)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v14"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v14 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; throw "v14 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v14|Overlay|Voices|OCR|OneCore|Unhandled|Exception| at " | Select-Object -Last 120 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $lat = Join-Path $shots "latency.txt"
+          if (Test-Path $lat) { Get-Content $lat; "## v14 latency (release to first audio)" >> $env:GITHUB_STEP_SUMMARY; Get-Content $lat >> $env:GITHUB_STEP_SUMMARY }
+          "v14 self-test exit code: $code (0 ok, 70 OCR unavailable, 71 strip not full lines, 72 tap paragraph, 73 two-corner mode, 74 flicker, 75 Esc, 76 latency, 77 repeated words)"
+          "## v14 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v14 self-test failed ($code)" }
+
       - name: Upload main window screenshots
         if: always()
         uses: actions/upload-artifact@v4
