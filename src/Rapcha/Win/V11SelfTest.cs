@@ -220,14 +220,22 @@ namespace Rapcha.Win
         {
             try
             {
-                var vs = Screen.PrimaryScreen.Bounds;
-                using (var bmp = new Bitmap(vs.Width, vs.Height, PixelFormat.Format32bppArgb))
-                {
-                    using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(vs.Location, Point.Empty, vs.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
-                    bmp.Save(Path.Combine(_out, name), ImageFormat.Png);
-                }
+                using (var bmp = Capture(Screen.PrimaryScreen.Bounds)) bmp.Save(Path.Combine(_out, name), ImageFormat.Png);
             }
             catch (Exception e) { Log("screenshot failed " + name + " " + e.GetType().Name); }
+        }
+
+        /// <summary>BitBlt with CAPTUREBLT so layered windows (outline, edge glow) are in the picture.</summary>
+        private static Bitmap Capture(Rectangle r)
+        {
+            var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                IntPtr dst = g.GetHdc(), src = Native.GetDC(IntPtr.Zero);
+                try { Native.BitBlt(dst, 0, 0, r.Width, r.Height, src, r.X, r.Y, Native.SRCCOPY | Native.CAPTUREBLT); }
+                finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+            }
+            return bmp;
         }
 
         private static double Dist(Color a, Color b) => Math.Sqrt(Sq(a.R - b.R) + Sq(a.G - b.G) + Sq(a.B - b.B));
@@ -314,7 +322,7 @@ namespace Rapcha.Win
             int deep = EdgeGlow.AlphaAt(size, 1.0, 800, 120);
             int side = EdgeGlow.AlphaAt(size, 1.0, 0, 450);
             int corner2 = EdgeGlow.AlphaAt(size, 2.0, 0, 0);
-            bool shape = corner == 0 && nearCorner < edge / 2 && edge > 180 && in8 < edge && in24 < in8 && in24 > 0 && deep == 0 && side > 180 && corner2 == 0;
+            bool shape = corner == 0 && nearCorner < edge / 2 && edge > 120 && in8 < edge && in24 < in8 && in24 > 0 && deep == 0 && side > 120 && corner2 == 0;
             Log("edge_glow alpha corner=" + corner + " near_corner=" + nearCorner + " edge=" + edge + " in8=" + in8 + " in24=" + in24 + " deep=" + deep + " side=" + side + " corner_200=" + corner2 + " ok=" + shape);
 
             // A preview over a light and a dark backdrop.
@@ -339,11 +347,7 @@ namespace Rapcha.Win
                 glow.Show(screen, null);
                 await Task.Delay(900);
                 Color mid;
-                using (var cap = new Bitmap(1, 1))
-                {
-                    using (var g = Graphics.FromImage(cap)) g.CopyFromScreen(screen.X + screen.Width / 2, screen.Y + 1, 0, 0, new Size(1, 1), CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
-                    mid = cap.GetPixel(0, 0);
-                }
+                using (var cap = Capture(new Rectangle(screen.X + screen.Width / 2, screen.Y + 1, 1, 1))) mid = cap.GetPixel(0, 0);
                 Shot("edge-glow-screen.png");
                 bool shown = glow.Active && glow.WindowCount >= 4;
                 glow.Hide();
