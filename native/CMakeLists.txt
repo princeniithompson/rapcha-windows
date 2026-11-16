@@ -27,6 +27,8 @@ else()
   set(GGML_F16C OFF CACHE BOOL "" FORCE)
 endif()
 set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
+# BMI2 needs _pdep_u64, which 32-bit MSVC does not have.
+set(GGML_BMI2 OFF CACHE BOOL "" FORCE)
 file(TO_CMAKE_PATH "${WHISPER_DIR}" WHISPER_SRC)
 add_subdirectory("${WHISPER_SRC}" whisper EXCLUDE_FROM_ALL)
 add_library(rapcha_whisper SHARED rapcha_whisper.cpp)
