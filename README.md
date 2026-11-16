@@ -31,7 +31,7 @@ Click **Cancel**, right-click the ring, or press **Esc** while it is listening t
 
 ## Select to speak
 
-Double-click the ring to turn it on (the screen edges glow). Then **drag over text** in any app and Rapcha reads it aloud, highlighting each phrase as it is spoken. Clicks are never touched: only a drag-selection is read. Double-click the ring again or press Esc to turn it off.
+Double-click the ring to turn it on (the screen edges glow). While it is on, select to speak has the upper hand: **click any text, icon or button** and Rapcha reads it aloud instead of the click going to the app (for example, clicking the VLC icon on the desktop reads "VLC media player"). Clicking empty space says "No text found at that location." Dragging over text still selects it and reads the selection. Clicks on Rapcha itself and right clicks work as usual. When reading ends the card closes; click again to read something else. Double-click the ring again or press Esc to turn it off.
 
 The first time, Rapcha downloads its natural offline voice once (Piper with the "Lessac" US English voice, about 86 MB) to `%AppData%\Rapcha\piper`. Every file is checked against a pinned SHA-256. Until it is ready, or if there is no internet, the built-in Windows voice is used. Settings shows the voice status and a speed slider.
 
