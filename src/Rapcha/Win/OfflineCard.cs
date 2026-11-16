@@ -23,7 +23,7 @@ namespace Rapcha.Win
         private readonly PillButton _getSpeech = new PillButton { Text = "Get Windows speech" };
         private readonly Label _speechHelp = Note(BuiltInSpeech.Instructions);
         private readonly Label _whisperTitle = new Label { Text = "Whisper (better offline accuracy)", AutoSize = true, Font = new Font(Theme.Sans, 10f, FontStyle.Bold), ForeColor = Theme.Ink, BackColor = Color.White, Margin = new Padding(0, 10, 0, 2) };
-        private readonly ComboBox _model = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, Font = new Font(Theme.Sans, 10f) };
+        private readonly ComboBox _model = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300, Font = new Font(Theme.Sans, 10f) };
         private readonly PillButton _download = new PillButton { Text = "Download Whisper model", Primary = true };
         private readonly PillButton _cancel = new PillButton { Text = "Cancel" };
         private readonly PillButton _delete = new PillButton { Text = "Delete model" };
@@ -145,7 +145,7 @@ namespace Rapcha.Win
                 var tier = DeviceTiers.Classify(facts);
                 _fallback.Checked = OfflineSettings.Fallback;
                 _device.Text = "This laptop: " + DeviceTiers.Describe(facts) + ". Level: " + DeviceTiers.Name(tier) +
-                               (tier == DeviceTier.Low ? " (built-in Windows speech, up to 5 minutes at a time)." :
+                               (tier == DeviceTier.Low ? (LowHasWhisper() ? " (you chose Whisper Tiny anyway: up to 2 minutes at a time offline)." : " (built-in Windows speech, up to 5 minutes at a time).") :
                                 tier == DeviceTier.Medium ? " (Whisper Tiny, up to 2 minutes at a time)." : " (Whisper Base or Small, up to 5 minutes at a time).");
 
                 bool speech = BuiltInSpeech.Available;
@@ -168,7 +168,7 @@ namespace Rapcha.Win
                 _download.Visible = true;                        // always visible…
                 _download.Enabled = !low && !busy && !installed;  // …greyed out on a Low laptop (a click does nothing)
                 _anywayRow.Visible = low && !busy && !installed;  // v17: …but a Low laptop may download the lightest model anyway, after a warning
-                _download.Text = installed ? "Whisper model downloaded" : "Download Whisper model";
+                _download.Text = installed ? "Downloaded ✓" : "Download Whisper model";   // short, so Delete model always fits beside it
                 _model.Enabled = !low && !busy && allowed.Count > 1;
                 _delete.Visible = installed && !busy;
                 _progressRow.Visible = busy;
@@ -196,6 +196,8 @@ namespace Rapcha.Win
             }
             finally { _loading = false; }
         }
+
+        private static bool LowHasWhisper() => ModelStore.IsInstalled(WhisperModels.Lightest);
 
         private static string WhisperStatus(WhisperModel m)
         {

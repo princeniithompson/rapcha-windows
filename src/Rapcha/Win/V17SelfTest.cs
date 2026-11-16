@@ -355,10 +355,15 @@ namespace Rapcha.Win
             long dlMs = sw.ElapsedMilliseconds;
             await WaitFor(() => WhisperNative.Status != WhisperNative.State.NotTried, 15000);
             card.Refresh();
-            bool installed = outcome == ModelStore.Outcome.Done && ModelStore.IsInstalled(WhisperModels.Tiny) && card.DeleteButton.Visible && !card.AnywayButton.Visible &&
+            bool installed0 = outcome == ModelStore.Outcome.Done && ModelStore.IsInstalled(WhisperModels.Tiny) && card.DeleteButton.Visible && !card.AnywayButton.Visible &&
                              card.WhisperNote.Text.StartsWith("Whisper Tiny is downloaded");
-            await Shot("v17-settings-whisper-low-downloaded.png", card.DeleteButton);
+            bool installed = installed0;
+            await Shot("v17-settings-whisper-low-downloaded.png", card.WhisperNote);
+            var delRect = card.DeleteButton.RectangleToScreen(card.DeleteButton.ClientRectangle);
+            var cardRect = card.Card.RectangleToScreen(card.Card.ClientRectangle);
+            bool deleteFits = cardRect.Contains(delRect);
 
+            installed &= deleteFits;
             // Offline: Whisper (2 minutes); online: Gemini.
             var choice = EnginePolicy.ChooseOffline(OfflineEngines.Inputs(false));
             bool usesWhisper = choice.Engine == SpeechEngine.Whisper && SessionCaps.MaxSeconds(SpeechEngine.Whisper, DeviceProbe.Tier) == 120;
@@ -391,7 +396,7 @@ namespace Rapcha.Win
             LowMemoryWarning.TestHook = null;
 
             Log("low whisper: offered=" + offered + " before_builtin=" + beforeBuiltIn + " cancel=" + cancelKeepsNothing + " warning=" + warningText + " outcome=" + outcome + " ms=" + dlMs +
-                " installed=" + installed + " whisper=" + usesWhisper + " starts=" + engineStarts + " engine_state=" + WhisperNative.Status + " online_gemini=" + online + " smode=" + smode + " deleted=" + deleted);
+                " installed=" + installed + " delete_fits=" + deleteFits + " whisper=" + usesWhisper + " starts=" + engineStarts + " engine_state=" + WhisperNative.Status + " online_gemini=" + online + " smode=" + smode + " deleted=" + deleted);
             _notes.Add("Low laptop: the memory warning stays, Download Whisper model stays greyed out, and \"Download lightest model anyway\" is offered: " + offered + " (built-in speech until then: " + beforeBuiltIn + ")");
             _notes.Add("The warning says the laptop may get hot, slow down, and use a lot of memory and battery: " + warningText + "; Cancel downloads nothing: " + cancelKeepsNothing +
                        "; Download anyway fetched Whisper Tiny with the SHA-256 check in " + (dlMs / 1000) + " s: " + installed);
