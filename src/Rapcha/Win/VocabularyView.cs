@@ -91,6 +91,7 @@ namespace Rapcha.Win
             _terms = AppStorage.LoadVocabulary();
             if (_terms.RemoveAll(t => string.Equals(t, term, StringComparison.OrdinalIgnoreCase)) == 0) return false;
             AppStorage.SaveVocabulary(_terms);
+            _status.Text = "";
             _chips.SetTerms(_terms);
             AppStorage.Log("Vocabulary: removed a word (" + _terms.Count + " in the list)");
             return true;
@@ -139,13 +140,14 @@ namespace Rapcha.Win
                 foreach (var t in _terms)
                 {
                     var ts = TextRenderer.MeasureText(g, t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-                    int w = Math.Min(right - x0, ts.Width + Px(16) + Px(12) + Px(22) + Px(6));
+                    int w = Math.Min(right - x0, Px(16) + ts.Width + Px(4) + Px(8) + Px(24) + Px(6));
                     if (x + w > right && x > x0) { x = x0; y += h + gap; }
                     if (y + h > card.Bottom - Px(12)) break;
                     var r = new Rectangle(x, y, w, h);
                     Theme.FillCard(g, r, h / 2f, Theme.Chip, Theme.ButtonBorder);
-                    Theme.Text(g, t, f, Theme.Ink, new Rectangle(r.X + Px(16), r.Y, w - Px(16) - Px(34), h), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-                    var xr = new Rectangle(r.Right - Px(32), r.Y + (h - Px(24)) / 2, Px(24), Px(24));
+                    Theme.Text(g, t, f, Theme.Ink, new Rectangle(r.X + Px(16), r.Y, w - Px(16) - Px(36), h),
+                               TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    var xr = new Rectangle(r.Right - Px(30), r.Y + (h - Px(24)) / 2, Px(24), Px(24));
                     if (_hotX == t) using (var hb = new SolidBrush(Theme.Pill)) g.FillEllipse(hb, xr);
                     Theme.Text(g, "×", xf, Theme.Muted, xr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     _chipRects.Add(new KeyValuePair<string, Rectangle>(t, r));
