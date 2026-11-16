@@ -325,7 +325,7 @@ namespace Rapcha.Win
         private void ToggleOverlay()
         {
             if (_overlay != null) { CloseOverlay(); return; }
-            if (_phase != Phase.Idle) return; // never while dictating
+            if (_phase != Phase.Idle) { AppStorage.Log("Overlay not opened: dictation is running"); return; }
             OpenOverlay();
         }
 
@@ -346,7 +346,7 @@ namespace Rapcha.Win
             }
             catch (Exception e)
             {
-                AppStorage.Log("Screen capture failed: " + e.GetType().Name);
+                AppStorage.Log("Screen capture failed: " + e.GetType().Name + " " + e.Message + " bounds=" + bounds);
                 ShowLabel("Couldn't capture the screen. Try again.", 3000, true);
                 return;
             }
