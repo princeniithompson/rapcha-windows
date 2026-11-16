@@ -46,6 +46,38 @@ jobs:
           if ($code -eq 2) { "::warning::No Windows voice on this runner; speech not exercised" }
           elseif ($code -ne 0) { throw "Speak self-test failed ($code)" }
 
+      - name: Piper voice self-test (download, verify SHA-256, synthesize)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest-piper "Put the food in the container, open the container."' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(900000)) { Stop-Process -Id $p.Id -Force; throw "Piper self-test hung" }
+          $code = $p.ExitCode
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest piper|Voice download|Piper" }
+          $dir = Join-Path $env:APPDATA "Rapcha\piper"
+          if (Test-Path $dir) { "Installed voice folder: {0:N1} MB" -f ((Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) }
+          "Piper self-test exit code: $code"
+          "## Piper self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "Piper self-test failed ($code)" }
+
+      - name: Select-to-speak self-test with Piper (phrases, timing, Forward 10)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $text = 'Put the food in the container, open the container. Then close the lid and put it away. When you are done, wash your hands, dry them well, and sit down to enjoy the meal with your family.'
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-speak "' + $text + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; throw "Piper speak self-test hung" }
+          $code = $p.ExitCode
+          $lines = if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest speak|Reading:|Piper" } else { @() }
+          $lines | Select-Object -Last 12
+          "Piper speak self-test exit code: $code"
+          if ($code -ne 0) { throw "Piper speak self-test failed ($code)" }
+          if (-not ($lines | Select-String "finished engine=piper.*ok=True")) { throw "Reading did not use Piper" }
+
       - name: Paste self-test (Notepad, informational)
         continue-on-error: true
         shell: pwsh
