@@ -197,7 +197,8 @@ namespace Rapcha.Win
         {
             if (_indexThread != null || _ocr == null) return;
             var have = new HashSet<string>(_ocr.Passes.Select(p => p.Name));
-            var jobs = OcrService.IndexJobs(Source, _dpi, YieldToReading, () => _hotCts.Token).Where(j => !have.Contains(j.name)).ToList();
+            PageLayout latest = _ocr.Page;
+            var jobs = OcrService.IndexJobs(Source, _dpi, YieldToReading, () => _hotCts.Token, () => latest).Where(j => !have.Contains(j.name)).ToList();
             _indexJobs = jobs.Count;
             if (jobs.Count == 0) { IndexReady = true; IndexMs = (int)(DateTime.UtcNow - _openedAt).TotalMilliseconds; return; }
             var basePasses = _ocr.Passes.ToList();
@@ -225,6 +226,7 @@ namespace Rapcha.Win
                         var t0 = DateTime.UtcNow;
                         OcrService.Rebuild(r);   // merge + lines + blocks, off the UI thread
                         p.MergeMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                        if (r.Problem.Length == 0) latest = r.Page;
                     }
                     var name = job.name;
                     OnUi(() => IndexStep(r, name, p));

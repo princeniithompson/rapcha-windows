@@ -153,7 +153,8 @@ namespace Rapcha.Win
         /// per-selection passes did: dark themes (norm), words dropped on long mixed lines (slices), small and
         /// coloured text (enlarged colour and norm slices) and faint grey text (thresholded).
         /// </summary>
-        public static List<(string name, Func<OcrPass> run)> IndexJobs(FrameSource src, int dpi, Action between = null, Func<System.Threading.CancellationToken> token = null)
+        public static List<(string name, Func<OcrPass> run)> IndexJobs(FrameSource src, int dpi, Action between = null, Func<System.Threading.CancellationToken> token = null,
+                                                                       Func<PageLayout> page = null)
         {
             double s1 = dpi >= 120 ? 1.0 : 1.5, s2 = dpi >= 120 ? 1.5 : 2.0;
             var full = new Rectangle(0, 0, src.W, src.H);
@@ -167,6 +168,13 @@ namespace Rapcha.Win
             if (s1 > 1.01) jobs.Add(("full-colour-" + X(s1), () => Grid(s1, Variant.Colour, false, "full-colour-" + X(s1), 1, src.W)));
             jobs.Add(("full-norm", () => Grid(s1, Variant.Norm, false, "full-norm", 1, src.W)));
             jobs.Add(("full-norm-tiles", () => Grid(s1, Variant.Norm, false, "full-norm-tiles", 2, tile)));
+            if (page != null)
+            {
+                // Each text row on its own, enlarged and sliced (what v13 did for every selection): the engine reads
+                // a lone row far better than the same row inside the whole screen (green code on dark, small grey).
+                jobs.Add(("lines-norm-" + X(s2), () => LineStrips(src, page(), s2, Variant.Norm, "lines-norm-" + X(s2), 4, tile, between, token)));
+                jobs.Add(("lines-colour-" + X(s2), () => LineStrips(src, page(), s2, Variant.Colour, "lines-colour-" + X(s2), 3, tile, between, token)));
+            }
             jobs.Add(("full-colour-tiles-" + X(s2), () => Grid(s2, Variant.Colour, false, "full-colour-tiles-" + X(s2), 3, tile)));
             jobs.Add(("full-norm-tiles-" + X(s2), () => Grid(s2, Variant.Norm, false, "full-norm-tiles-" + X(s2), 3, tile)));
             jobs.Add(("full-bin-tiles-" + X(s2), () => Grid(s2, Variant.Bin, false, "full-bin-tiles-" + X(s2), 2, tile)));
@@ -217,6 +225,48 @@ namespace Rapcha.Win
                     if (x + w >= rect.Right) break;
                 }
                 if (y + h >= rect.Bottom) break;
+            }
+            pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            return pass;
+        }
+
+        /// <summary>
+        /// The rows of text found so far (lines side by side and close together form one row), each read again on
+        /// its own: the row's box with a little margin, enlarged, cut into slices narrower than the row. Only words
+        /// centred inside the row are kept (a strip also catches the edges of the rows above and below).
+        /// </summary>
+        public static OcrPass LineStrips(FrameSource src, PageLayout page, double scale, Variant v, string name, int priority, int tile,
+                                         Action between, Func<System.Threading.CancellationToken> token)
+        {
+            var t0 = DateTime.UtcNow;
+            var pass = new OcrPass { Name = name, Priority = priority, Area = new Box(0, 0, src.W, src.H) };
+            if (page == null) return pass;
+            var rows = new List<Box>();
+            foreach (var l in page.Lines.Where(x => x.Words.Count > 0 && x.Box.H >= 4).OrderBy(x => x.Box.Y).ThenBy(x => x.Box.X))
+            {
+                int hit = -1;
+                for (int i = rows.Count - 1; i >= 0 && i >= rows.Count - 6; i--)
+                {
+                    var r = rows[i];
+                    double ov = Math.Min(r.Bottom, l.Box.Bottom) - Math.Max(r.Y, l.Box.Y);
+                    double gap = Math.Max(l.Box.X - r.Right, r.X - l.Box.Right);
+                    if (ov >= 0.6 * Math.Min(r.H, l.Box.H) && Math.Max(r.H, l.Box.H) <= 1.6 * Math.Min(r.H, l.Box.H) && gap < 3 * l.Box.H) { hit = i; break; }
+                }
+                if (hit >= 0) rows[hit] = rows[hit].Union(l.Box); else rows.Add(l.Box);
+            }
+            foreach (var r in rows)
+            {
+                double mx = Math.Max(6, r.H * 0.8), my = Math.Max(3, r.H * 0.35);
+                var rect = Rectangle.Intersect(new Rectangle((int)Math.Floor(r.X - mx), (int)Math.Floor(r.Y - my), (int)Math.Ceiling(r.W + 2 * mx), (int)Math.Ceiling(r.H + 2 * my)),
+                                               new Rectangle(0, 0, src.W, src.H));
+                if (rect.Width < 8 || rect.Height < 6) continue;
+                int tw = rect.Width > tile * 0.7 ? Math.Min(tile, Math.Max(160, rect.Width / 2 + 60)) : rect.Width;
+                var p = GridPass(src, rect, scale, v, false, name, priority, tw, rect.Height, between, token);
+                foreach (var line in p.Lines)
+                {
+                    var keep = line.Where(w => w.Box.CenterY >= r.Y - 0.2 * r.H && w.Box.CenterY <= r.Bottom + 0.2 * r.H && w.Box.H <= 1.8 * r.H).ToList();
+                    if (keep.Count > 0) pass.Lines.Add(keep);
+                }
             }
             pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
             return pass;
