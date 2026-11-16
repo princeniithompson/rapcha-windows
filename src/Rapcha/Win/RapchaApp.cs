@@ -92,6 +92,7 @@ namespace Rapcha.Win
             AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
                            (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
+            Uia.WarmUp();
             _ = VoiceSettings.RemovePiperAsync(); // older versions downloaded a voice here; it is no longer used
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (_selfTestRing) { RunRingSelfTest(); return; }

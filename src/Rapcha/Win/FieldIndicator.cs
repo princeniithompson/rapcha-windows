@@ -44,7 +44,7 @@ namespace Rapcha.Win
             try
             {
                 var why = new StringBuilder();
-                var info = await Uia.FocusedFieldAsync(target, 800, why) ?? new FieldInfo { Reason = "uia_timeout" + why };
+                var info = await Uia.FocusedFieldAsync(target, Uia.WarmedUp ? 1000 : 3000, why) ?? new FieldInfo { Reason = "uia_timeout" + why };
                 Last = info;
                 return info;
             }

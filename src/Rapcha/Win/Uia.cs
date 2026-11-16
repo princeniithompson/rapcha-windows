@@ -23,6 +23,19 @@ namespace Rapcha.Win
 
     public static class Uia
     {
+        public static bool WarmedUp { get; private set; }
+
+        /// <summary>Loads UI Automation in the background once, so the first field lookup is quick.</summary>
+        public static void WarmUp()
+        {
+            var t = new Thread(() =>
+            {
+                try { var _ = AutomationElement.FocusedElement; WarmedUp = true; } catch { }
+            }) { IsBackground = true, Name = "Rapcha UIA warm-up", Priority = ThreadPriority.BelowNormal };
+            t.SetApartmentState(ApartmentState.MTA);
+            t.Start();
+        }
+
         private static Task<T> RunMta<T>(Func<T> work, int timeoutMs, StringBuilder why, string what)
         {
             var tcs = new TaskCompletionSource<T>();
@@ -52,6 +65,7 @@ namespace Rapcha.Win
             {
                 var info = new FieldInfo();
                 var el = AutomationElement.FocusedElement;
+                WarmedUp = true;
                 if (el == null) { info.Reason = "no_focus"; return info; }
                 var cur = el.Current;
                 if (target != IntPtr.Zero)
