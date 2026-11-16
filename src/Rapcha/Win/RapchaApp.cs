@@ -342,7 +342,16 @@ namespace Rapcha.Win
             {
                 shot = new Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
                 using (var g = Graphics.FromImage(shot))
-                    g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+                {
+                    // BitBlt with CAPTUREBLT so layered windows are included (Graphics.CopyFromScreen rejects that flag).
+                    IntPtr dst = g.GetHdc(), src = Native.GetDC(IntPtr.Zero);
+                    try
+                    {
+                        if (!Native.BitBlt(dst, 0, 0, bounds.Width, bounds.Height, src, bounds.X, bounds.Y, Native.SRCCOPY | Native.CAPTUREBLT))
+                            throw new System.ComponentModel.Win32Exception();
+                    }
+                    finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                }
             }
             catch (Exception e)
             {
