@@ -159,10 +159,8 @@ namespace Rapcha.Win
             using (var fi = new FieldIndicator())
             {
                 fi.Color = GlowPicker.FromRgb(AppStorage.LoadGlowColor());   // what RapchaApp does on GlowChanged
-                var info = await fi.BeginAsync(w.Handle);
-                Log("outline detected=" + info.Editable + " type=" + info.Type + " reason=" + info.Reason);
                 var box = w.Vocabulary.Input.RectangleToScreen(w.Vocabulary.Input.ClientRectangle);
-                if (!fi.Active) fi.Glow.Show(box);   // detection is covered by the ring self-test; here we check the drawing
+                fi.Glow.Show(box);   // Rapcha's own windows are never a paste target; detection is covered by the v11 self-test
                 await Task.Delay(400);
                 var field = fi.Glow.Field;
                 int cx = field.X + field.Width / 2;

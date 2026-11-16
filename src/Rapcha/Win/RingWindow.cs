@@ -238,7 +238,7 @@ namespace Rapcha.Win
                     double breath = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / (_state == RingState.Recording ? 1.6 : 0.9));
                     float strength = (float)(0.45 + 0.35 * breath + (_state == RingState.Recording ? 0.25 * _level : 0));
                     strength = Math.Min(1f, strength);
-                    var core = _state == RingState.Recording ? Color.FromArgb(150, 190, 60) : Color.FromArgb(224, 190, 70);
+                    var core = _state == RingState.Recording ? Accent.Color : Accent.Lighter(0.28); // the user's glow colour
                     using (var path = new GraphicsPath())
                     {
                         path.AddEllipse(0, 0, size - 1, size - 1);
@@ -263,9 +263,9 @@ namespace Rapcha.Win
                     double breath = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 2.4);
                     float w = Math.Max(2f, glow * 0.45f);
                     float inset = glow * 0.35f;
-                    using (var halo = new Pen(Color.FromArgb((int)(90 + 80 * breath), 200, 225, 120), w))
+                    using (var halo = new Pen(Color.FromArgb((int)(90 + 80 * breath), Accent.Lighter(0.35)), w))
                         g.DrawEllipse(halo, inset, inset, size - inset * 2, size - inset * 2);
-                    using (var arc = new Pen(Color.FromArgb(235, 255, 244, 200), w) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    using (var arc = new Pen(Color.FromArgb(235, Accent.Lighter(0.8)), w) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                         g.DrawArc(arc, inset, inset, size - inset * 2, size - inset * 2, (float)((t * 120) % 360), 70f);
                 }
 

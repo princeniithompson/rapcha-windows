@@ -30,7 +30,7 @@ namespace Rapcha.Win
             return result == TextDelivery.Result.Copied ? 3 : 1;
         }
 
-        private static IntPtr FindEditor(IntPtr top)
+        internal static IntPtr FindEditor(IntPtr top)
         {
             foreach (var cls in new[] { "Edit", "RichEditD2DPT", "RICHEDIT50W" })
             {
@@ -46,7 +46,7 @@ namespace Rapcha.Win
             return IntPtr.Zero;
         }
 
-        private static string GetText(IntPtr hwnd)
+        internal static string GetText(IntPtr hwnd)
         {
             int len = (int)Native.SendMessage(hwnd, Native.WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
             var sb = new StringBuilder(Math.Max(1, len + 1));

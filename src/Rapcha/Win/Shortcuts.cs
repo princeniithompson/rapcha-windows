@@ -10,14 +10,16 @@ namespace Rapcha.Win
     /// </summary>
     internal static class Shortcuts
     {
-        private static string FlagPath => Path.Combine(AppStorage.Folder, "shortcuts.txt");
+        // v1–v10 used shortcuts.txt as this flag; from v11 that file holds the keyboard shortcuts (Settings → Shortcuts).
+        private static string FlagPath => Path.Combine(AppStorage.Folder, "desktop-shortcut.txt");
+        private static string OldFlagPath => Path.Combine(AppStorage.Folder, "shortcuts.txt");
 
         public static void Ensure()
         {
             try
             {
                 string exe = InstanceManager.CurrentExePath();
-                bool firstRun = !File.Exists(FlagPath);
+                bool firstRun = !File.Exists(FlagPath) && !File.Exists(OldFlagPath);
                 var places = new[]
                 {
                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Rapcha.lnk"),
@@ -31,7 +33,7 @@ namespace Rapcha.Win
                     Write(lnk, exe);
                     AppStorage.Log("Shortcut " + (exists ? "updated" : "created") + ": " + lnk);
                 }
-                if (firstRun) File.WriteAllText(FlagPath, DateTime.Now.ToString("s"));
+                if (!File.Exists(FlagPath)) File.WriteAllText(FlagPath, DateTime.Now.ToString("s"));
             }
             catch (Exception e)
             {

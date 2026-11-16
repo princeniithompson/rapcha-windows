@@ -34,6 +34,22 @@ namespace Rapcha.Win
                 Application.Run(new MainSelfTest(args[1]));
                 return;
             }
+            if (args.Length >= 1 && args[0] == "--testform")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new FieldTestForms());
+                return;
+            }
+            if (args.Length >= 2 && args[0] == "--selftest-v11")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new V11SelfTest(args[1]));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-paste") { Environment.ExitCode = SelfTest.Paste(args[1]); return; }
             if (args.Length >= 2 && args[0] == "--selftest-ocr")
             {

@@ -27,6 +27,8 @@ namespace Rapcha.Win
         private readonly TrackBar _speed = new TrackBar();
         private readonly Label _speedLabel = new Label();
         private readonly GlowPicker _glow = new GlowPicker();
+        private readonly ShortcutsRows _shortcuts = new ShortcutsRows();
+        internal ShortcutsRows Shortcuts => _shortcuts;
         private readonly Timer _meterCheck = new Timer { Interval = 500 };
         private readonly TableLayoutPanel _layout;
 
@@ -129,8 +131,11 @@ namespace Rapcha.Win
                 _key, _show, Row(_save), _status));
             _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_micSettings)));
             _layout.Controls.Add(Card("Glow colour",
-                Help("The outline around the text box you are typing into, and the glow around the screen in select to speak."),
+                Help("Applies to the ring glow, the words box, the text-box outline and the select-to-speak screen glow."),
                 _glow));
+            _layout.Controls.Add(Card("Shortcuts",
+                Help("Start voice typing or select to speak from the keyboard, in any app."),
+                _shortcuts));
             _layout.Controls.Add(Card("Select to speak",
                 Help("Double-click the ring, then drag a box around any text on the screen (or tap a word) to hear it. Esc closes."),
                 _voiceStatus, speedRow));

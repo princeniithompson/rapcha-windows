@@ -44,6 +44,7 @@ namespace Rapcha.Win
 
         // Voice typing: the text field the words will go into.
         private readonly FieldIndicator _field = new FieldIndicator();
+        private readonly ShortcutManager _shortcuts;
 
         // Ring and Words bubble move together while the bubble is up.
         private Point _bubbleOffset;
@@ -68,6 +69,25 @@ namespace Rapcha.Win
 
             ApplyGlowColor();
             AppStorage.GlowChanged += ApplyGlowColor;
+
+            // The ring wakes when focus enters a real text field; the words box shows whether there is one.
+            _field.EnableFocusEvents();
+            _field.WantFocusChecks = () => _phase == Phase.Idle && _ring.Resting;
+            _field.FocusEnteredField += () =>
+            {
+                if (!_ring.Resting) return;
+                AppStorage.Log("Ring: woke (focus entered a text field)");
+                _ring.Wake();
+            };
+            _field.Changed += info =>
+            {
+                _bubble.FieldValid = _field.HasField;
+                AppStorage.Log("[s" + _sessionNumber + "] field: " + DescribeField(info) + " moves=" + _field.Moves);
+            };
+            _shortcuts = new ShortcutManager();
+            _shortcuts.Triggered += OnShortcut;
+            ApplyShortcuts();
+            AppStorage.ShortcutsChanged += ApplyShortcuts;
 
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
@@ -121,6 +141,39 @@ namespace Rapcha.Win
             var c = GlowPicker.FromRgb(AppStorage.LoadGlowColor());
             _glow.Color = c;
             _field.Color = c;
+            Accent.Set(c);   // ring, words box, field outline and screen glow share one colour
+        }
+
+        private void ApplyShortcuts() => _shortcuts.Apply(AppStorage.LoadShortcuts());
+
+        private bool _holdSession;
+
+        private void OnShortcut(ShortcutAction a, bool down)
+        {
+            switch (a)
+            {
+                case ShortcutAction.TapToTalk:
+                    if (!down) return;
+                    if (_phase == Phase.Idle) StartRecording();
+                    else if (_phase == Phase.Recording) _ = FinishAsync();
+                    break;
+                case ShortcutAction.HoldToTalk:
+                    if (down)
+                    {
+                        if (_phase != Phase.Idle) return;
+                        StartRecording();
+                        _holdSession = _phase == Phase.Recording;
+                    }
+                    else
+                    {
+                        if (_holdSession && _phase == Phase.Recording) _ = FinishAsync();
+                        _holdSession = false;
+                    }
+                    break;
+                case ShortcutAction.SelectToSpeak:
+                    if (down) ToggleOverlay();
+                    break;
+            }
         }
 
         private void OnRingMoved()
@@ -202,26 +255,28 @@ namespace Rapcha.Win
             _label.HideNow();
             _ring.State = RingState.Recording;
             _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
-            _ = ShowTargetFieldAsync(gen, number);
+            _field.Start(_target);           // follows focus every 300 ms (and on UIA focus events) until the words are in
+            _bubble.FieldValid = null;
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
             _watch.Start();
             _ = session.ConnectAsync();
         }
 
-        /// <summary>Outlines the text field the words will go into, or says there isn't one.</summary>
-        private async Task ShowTargetFieldAsync(int gen, int number)
+        /// <summary>The field focused right now if it is a real text field; no field means clipboard only.</summary>
+        private async Task<IntPtr> FinalTargetAsync(int number)
         {
-            FieldInfo info;
-            try { info = await _field.BeginAsync(_target); }
-            catch (Exception e) { AppStorage.Log("[s" + number + "] field lookup failed: " + e.GetType().Name); return; }
-            if (gen != _generation || _phase == Phase.Idle) return; // a newer session or the end already reset the outline
-            ApplyField(info);
-            AppStorage.Log("[s" + number + "] field: " + DescribeField(info));
-        }
-
-        private void ApplyField(FieldInfo info)
-        {
-            _bubble.Note = info.Editable ? "" : Messages.NoTextBox;
+            try
+            {
+                var waitAt = DateTime.UtcNow;
+                while (_field.Busy && (DateTime.UtcNow - waitAt).TotalMilliseconds < 1500) await Task.Delay(40);
+                await _field.CheckNowAsync();
+            }
+            catch (Exception e) { AppStorage.Log("[s" + number + "] final field check failed: " + e.GetType().Name); }
+            var has = _field.HasField;
+            var t = has == true ? _field.Target : has == false ? IntPtr.Zero : _target;
+            AppStorage.Log("[s" + number + "] paste target: " + (has == true ? "field " + DescribeField(_field.Last ?? new FieldInfo()) : has == false ? "none (clipboard only)" : "unknown (window at start)") +
+                           " checks=" + _field.Checks + " moves=" + _field.Moves);
+            return t;
         }
 
         private string DescribeField(FieldInfo info) =>
@@ -276,6 +331,12 @@ namespace Rapcha.Win
             text = (text ?? "").Trim();
             LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
+            var target = IntPtr.Zero;
+            if (text.Length > 0)
+            {
+                target = await FinalTargetAsync(number);
+                if (gen != _generation || _phase != Phase.Finishing) return;
+            }
             ResetToIdle(keepField: text.Length > 0);
 
             if (text.Length == 0)
@@ -291,7 +352,7 @@ namespace Rapcha.Win
             _bubble.Set(WordsBubble.Mode.Final, text);
             _ring.State = RingState.Polishing; // keep spinning until the words are in
             TextDelivery.Result result;
-            try { result = TextDelivery.Deliver(text, _target); }
+            try { result = TextDelivery.Deliver(text, target); }
             finally
             {
                 if (_phase == Phase.Idle) _ring.State = RingState.Idle;
@@ -524,7 +585,7 @@ namespace Rapcha.Win
             int voices = SpeechReader.CountVoices();
             AppStorage.Log("Selftest ocr: sapi_voices=" + voices);
             if (voices == 0) { SelfTestExit(2); return; }
-            int stage = 0;
+            int stage = 0, closeWait = 0;
             DateTime stageAt = DateTime.UtcNow;
             TextLine line = null;
             ColumnsTestForm columns = null;
@@ -618,7 +679,7 @@ namespace Rapcha.Win
                     }
                     case 6:
                     {
-                        if (_overlay != null) return;
+                        if (_overlay != null || (_glow.Active && closeWait++ < 12)) return; // the glow fades out (~0.2 s)
                         bool closed = !_glow.Active && Application.OpenForms.OfType<ScreenOverlay>().Count() == 0;
                         bool piperGone = !System.IO.Directory.Exists(VoiceSettings.PiperFolder);
                         AppStorage.Log("Selftest ocr: closed=" + closed + " piper_folder_gone=" + piperGone);
@@ -691,7 +752,6 @@ namespace Rapcha.Win
         {
             int stage = 0;
             DateTime at = DateTime.UtcNow;
-            ColumnsTestForm plain = null;
             Point offset = Point.Empty;
             IntPtr notepad = IntPtr.Zero;
             var poll = new Timer { Interval = 100 };
@@ -854,40 +914,24 @@ namespace Rapcha.Win
                         if (Since() < 800) return;
                         stage = 60; // busy
                         _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
-                        var info = await _field.BeginAsync(notepad);
-                        ApplyField(info);
+                        _field.Start(notepad);
+                        var waitAt = DateTime.UtcNow;
+                        while ((_field.HasField == null || _field.Busy) && (DateTime.UtcNow - waitAt).TotalMilliseconds < 4000) await Task.Delay(100);
+                        var info = _field.Last ?? new FieldInfo();
                         var edit = Native.FindWindowEx(notepad, IntPtr.Zero, "Edit", null);
                         Native.GetWindowRect(edit, out var er);
                         var editRect = Rectangle.FromLTRB(er.Left, er.Top, er.Right, er.Bottom);
                         var o = _field.Outline;
                         bool near = Math.Abs(o.X - editRect.X) <= 12 && Math.Abs(o.Y - editRect.Y) <= 12 && Math.Abs(o.Right - editRect.Right) <= 12 && Math.Abs(o.Bottom - editRect.Bottom) <= 12;
                         AppStorage.Log("Selftest ring: notepad " + DescribeField(info) + " edit=" + editRect.Width + "x" + editRect.Height +
-                                       " outline_matches_edit=" + near + " glow_active=" + _field.Active + " note_empty=" + (_bubble.Note.Length == 0));
-                        if (!info.Editable || !_field.Active || !near || _bubble.Note.Length != 0) { Fail(16, "Notepad field"); return; }
-                        _field.Hide();
+                                       " outline_matches_edit=" + near + " glow_active=" + _field.Active + " bubble_field=" + _bubble.FieldValid);
+                        if (!info.Editable || !_field.Active || !near || _bubble.FieldValid != true) { Fail(16, "Notepad field"); return; }
+                        _field.Stop();
+                        await Task.Delay(400); // the outline fades
                         bool hidden = !_field.Active;
                         AppStorage.Log("Selftest ring: outline hidden=" + hidden);
-                        if (!hidden) { Fail(16, "outline did not hide"); return; }
-                        // A window with no text field at all.
-                        plain = new ColumnsTestForm();
-                        plain.Show();
-                        plain.Activate();
-                        Next(7);
-                        break;
-                    }
-                    case 7:
-                    {
-                        if (Since() < 1000) return;
-                        stage = 70;
-                        var info = await _field.BeginAsync(plain.Handle);
-                        ApplyField(info);
-                        await Task.Delay(200);
-                        bool note = _bubble.Note == Messages.NoTextBox;
-                        AppStorage.Log("Selftest ring: plain window " + DescribeField(info) + " note_shown=" + note);
-                        _field.Hide();
                         _bubble.Close2();
-                        plain.Close();
-                        if (info.Editable || _field.Active || !note) { Fail(17, "no-field note"); return; }
+                        if (!hidden) { Fail(16, "outline did not hide"); return; }
                         poll.Stop(); deadline.Stop();
                         AppStorage.Log("Selftest ring: ok=True");
                         SelfTestExit(0);
@@ -939,6 +983,7 @@ namespace Rapcha.Win
             CloseOverlay();
             _glow.Dispose();
             _field.Dispose();
+            _shortcuts.Dispose();
             Cancel(null);
             _tray.Visible = false;
             _tray.Dispose();

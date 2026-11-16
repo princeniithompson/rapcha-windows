@@ -18,7 +18,6 @@ namespace Rapcha.Win
         public const string NoSound = "No sound came from the microphone. " + MicSteps;
         public const string TooQuiet = "I couldn't hear you. Speak closer to the microphone, or choose another one in Settings.";
         public const string GeminiNothing = "Gemini returned nothing for your speech. Try again and speak a little longer.";
-        public const string NoTextBox = "No text box — I'll copy it for you.";
         public const string GeminiSlow = "Gemini didn't answer in time. Check your internet and try again.";
 
         public static string For(LiveError e)

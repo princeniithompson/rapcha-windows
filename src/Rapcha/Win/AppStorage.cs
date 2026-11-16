@@ -127,6 +127,23 @@ namespace Rapcha.Win
             Log("History: saved a transcript (" + h.Items.Count + " in history)");
         }
 
+        // ---- Keyboard shortcuts ----
+        private static string ShortcutsPath => Path.Combine(Folder, "shortcuts.txt");
+        public static event Action ShortcutsChanged;
+
+        public static ShortcutSet LoadShortcuts()
+        {
+            try { return File.Exists(ShortcutsPath) ? ShortcutSet.FromText(File.ReadAllText(ShortcutsPath, Encoding.UTF8)) : ShortcutSet.Defaults(); }
+            catch { return ShortcutSet.Defaults(); }
+        }
+
+        public static void SaveShortcuts(ShortcutSet set)
+        {
+            try { WriteAtomic(ShortcutsPath, new UTF8Encoding(false).GetBytes(set.ToText())); }
+            catch (Exception e) { Log("Shortcuts: save failed (" + e.GetType().Name + ")"); }
+            ShortcutsChanged?.Invoke();
+        }
+
         // ---- Glow colour ----
         private static string GlowPath => Path.Combine(Folder, "glow.txt");
         private static int? _glow;

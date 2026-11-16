@@ -1,78 +1,163 @@
 using System;
 using System.Drawing;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Rapcha.Win
 {
     /// <summary>
-    /// While voice typing, outlines the text field the words will go into with a rounded outline in the user's
-    /// glow colour (Settings → Glow colour). Click-through, never takes focus, ~20 frames per second on four thin strips.
-    /// The field is looked up with UI Automation once at the start and then once a second (it may move or the
-    /// user may click another field).
+    /// Follows keyboard focus while voice typing: a rounded outline in the user's glow colour around the real
+    /// text field that has focus (and a caret), moved when the user clicks into another field, hidden when focus
+    /// leaves text. <see cref="Target"/> is the window the words will be pasted into, or zero (clipboard only).
+    /// Focus is re-checked on every UIA focus-changed event and every 300 ms. The same focus events also tell
+    /// the app when focus enters a text field while idle (to wake the resting ring).
     /// </summary>
     public sealed class FieldIndicator : IDisposable
     {
         public const int ThicknessDip = FieldGlow.GlowDip + 2;
+        public const int PollMs = 300;
         private readonly FieldGlow _glow = new FieldGlow(50);
-        private readonly Timer _refresh = new Timer { Interval = 1000 };
-        private IntPtr _target;
+        private readonly System.Windows.Forms.Timer _poll = new System.Windows.Forms.Timer { Interval = PollMs };
+        private readonly SynchronizationContext _ui;
+        private int _busy;              // a lookup is running
+        private int _focusPending;      // a focus event is waiting to be handled
         private int _session;
-        private bool _busy;
 
+        public bool Tracking { get; private set; }
         public bool Active => _glow.Active;
-        public Rectangle Outline { get; private set; }   // the field rect the glow surrounds (after clamping)
+        public Rectangle Outline { get; private set; }
         public FieldInfo Last { get; private set; }
+        /// <summary>True: a valid field has focus; false: none; null: not known yet.</summary>
+        public bool? HasField { get; private set; }
+        /// <summary>The window of the focused text field (the paste target), or zero.</summary>
+        public IntPtr Target { get; private set; }
+        public int Checks { get; private set; }
+        public int Moves { get; private set; }
+        /// <summary>A lookup is running right now.</summary>
+        public bool Busy => Volatile.Read(ref _busy) == 1;
         public FieldGlow Glow => _glow;
         public Color Color { get => _glow.Color; set => _glow.Color = value; }
 
+        /// <summary>The field / target changed while tracking (UI thread).</summary>
+        public event Action<FieldInfo> Changed;
+        /// <summary>Focus landed in a valid text field (any time; UI thread). Only checked when WantFocusChecks says so.</summary>
+        public event Action FocusEnteredField;
+        /// <summary>Whether idle focus events should be evaluated (e.g. only while the ring rests).</summary>
+        public Func<bool> WantFocusChecks;
+
         public FieldIndicator()
         {
-            _refresh.Tick += async (s, e) =>
-            {
-                if (_busy || _target == IntPtr.Zero) return;
-                int session = _session;
-                var info = await DetectAsync(_target);
-                if (session != _session || _target == IntPtr.Zero) return;
-                if (info.Editable) Show(info); else Hide(keepTarget: true);
-            };
+            _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+            _poll.Tick += async (s, e) => { if (Tracking) await CheckNowAsync(); };
         }
 
-        /// <summary>Looks up the focused field in the target window (at most ~800 ms).</summary>
-        public async Task<FieldInfo> DetectAsync(IntPtr target)
+        /// <summary>Starts listening to UIA focus events (once, at app start).</summary>
+        public void EnableFocusEvents()
         {
-            _busy = true;
+            Uia.StartFocusEvents(() =>
+            {
+                if (Interlocked.Exchange(ref _focusPending, 1) == 1) return;
+                _ui.Post(async _ =>
+                {
+                    await Task.Delay(60); // let the app finish moving focus (and its caret)
+                    Interlocked.Exchange(ref _focusPending, 0);
+                    await OnFocusEventAsync();
+                }, null);
+            });
+        }
+
+        private async Task OnFocusEventAsync()
+        {
+            if (Tracking) { await CheckNowAsync(); return; }
+            if (WantFocusChecks == null || !WantFocusChecks()) return;
+            var info = await LookupAsync();
+            if (info != null && info.Editable) FocusEnteredField?.Invoke();
+        }
+
+        private async Task<FieldInfo> LookupAsync()
+        {
+            if (Interlocked.Exchange(ref _busy, 1) == 1) return null; // the previous lookup is still running (a slow app)
             try
             {
                 var why = new StringBuilder();
-                var info = await Uia.FocusedFieldAsync(target, Uia.WarmedUp ? 1000 : 3000, why) ?? new FieldInfo { Reason = "uia_timeout" + why };
-                Last = info;
+                var info = await Uia.FocusedFieldAsync(Uia.WarmedUp ? 1000 : 3000, why);
+                Checks++;
+                if (info == null) { Last = new FieldInfo { Reason = "uia_timeout" + why }; return null; }
                 return info;
             }
-            finally { _busy = false; }
+            finally { Interlocked.Exchange(ref _busy, 0); }
         }
 
-        /// <summary>Starts following the target window's focused field; returns what was found first.</summary>
-        public async Task<FieldInfo> BeginAsync(IntPtr target)
+        /// <summary>Starts following focus (voice typing started). <paramref name="provisional"/> is used until the first lookup answers.</summary>
+        public void Start(IntPtr provisional)
         {
-            Hide();
-            int session = ++_session;
-            _target = target;
-            var info = await DetectAsync(target);
-            if (session != _session) return info;
-            if (info.Editable) Show(info);
-            _refresh.Start();
+            _session++;
+            Tracking = true;
+            HasField = null;
+            Target = provisional;
+            Moves = 0;
+            _poll.Start();
+            _ = CheckNowAsync();
+        }
+
+        /// <summary>Stops following focus and hides the outline (the last decision stays readable).</summary>
+        public void Stop()
+        {
+            Tracking = false;
+            _poll.Stop();
+            _session++;
+            HideOutline();
+        }
+
+        public void Hide() => Stop();
+
+        /// <summary>One lookup now; applies it while tracking. Returns null if UIA did not answer (state kept).</summary>
+        public async Task<FieldInfo> CheckNowAsync()
+        {
+            int session = _session;
+            var info = await LookupAsync();
+            if (info == null) return null;
+            if (session != _session && !Tracking) return info;
+            Last = info;
+            if (!Tracking) return info;
+            if (info.OwnApp) return info;            // clicks on Rapcha's own windows keep the field
+            Apply(info);
             return info;
         }
 
-        private void Show(FieldInfo info)
+        private void Apply(FieldInfo info)
         {
-            var r = Clamp(info.Bounds, _target);
-            if (r.Width < 6 || r.Height < 6) { Hide(keepTarget: true); return; }
-            if (_glow.Active && r == Outline) return;
-            Outline = r;
-            _glow.Show(r);
+            bool before = HasField == true;
+            var oldTarget = Target;
+            var oldOutline = Outline;
+            if (info.Editable)
+            {
+                HasField = true;
+                Target = info.Window;
+                var r = Clamp(info.Bounds, info.Window);
+                if (r.Width >= 6 && r.Height >= 6)
+                {
+                    if (!_glow.Active || r != Outline) { Outline = r; _glow.Show(r); }
+                }
+                else HideOutline();
+            }
+            else
+            {
+                HasField = false;
+                Target = IntPtr.Zero;
+                HideOutline();
+            }
+            bool changed = before != (HasField == true) || oldTarget != Target || oldOutline != Outline;
+            if (changed && before && HasField == true) Moves++;
+            if (changed) Changed?.Invoke(info);
+        }
+
+        private void HideOutline()
+        {
+            _glow.Hide();
+            Outline = Rectangle.Empty;
         }
 
         /// <summary>
@@ -91,26 +176,17 @@ namespace Rapcha.Win
             var screen = Screen.FromRectangle(field.Width > 0 ? field : r).Bounds;
             r.Intersect(screen);
             if (r.Width <= 0 || r.Height <= 0) return Rectangle.Empty;
-            // Leave room for the glow inside the screen.
             int t = (int)Math.Round(ThicknessDip * Native.DpiAt(r.X + r.Width / 2, r.Y + r.Height / 2) / 96.0);
             var inner = Rectangle.FromLTRB(screen.Left + t, screen.Top + t, screen.Right - t, screen.Bottom - t);
             r.Intersect(inner);
             return r.Width > 0 && r.Height > 0 ? r : Rectangle.Empty;
         }
 
-        public void Hide() => Hide(false);
-
-        private void Hide(bool keepTarget)
-        {
-            if (!keepTarget) { _refresh.Stop(); _target = IntPtr.Zero; _session++; }
-            _glow.Hide();
-            Outline = Rectangle.Empty;
-        }
-
         public void Dispose()
         {
-            Hide();
-            _refresh.Dispose();
+            Stop();
+            Uia.StopFocusEvents();
+            _poll.Dispose();
             _glow.Dispose();
         }
     }
