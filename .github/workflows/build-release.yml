@@ -144,26 +144,55 @@ jobs:
         run: |
           $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
           $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
-          Add-Type -Namespace W -Name U -MemberDefinition @'
-          [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
-          [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-          [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-          [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, int m, IntPtr w, IntPtr l);
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class RapchaWin {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, int m, IntPtr w, IntPtr l);
+            // Visible top-level window with this title; pid 0 = any process. Returns "pid:hwnd" list for logging too.
+            public static IntPtr Find(string title, int pid) {
+              IntPtr found = IntPtr.Zero;
+              EnumWindows((h, l) => {
+                var sb = new StringBuilder(256); GetWindowText(h, sb, 256);
+                if (sb.ToString() != title || !IsWindowVisible(h)) return true;
+                uint p; GetWindowThreadProcessId(h, out p);
+                if (pid != 0 && p != (uint)pid) return true;
+                found = h; return false;
+              }, IntPtr.Zero);
+              return found;
+            }
+            public static string Owner(string title) {
+              var list = new StringBuilder();
+              EnumWindows((h, l) => {
+                var sb = new StringBuilder(256); GetWindowText(h, sb, 256);
+                if (sb.ToString() == title) { uint p; GetWindowThreadProcessId(h, out p); list.Append(p + (IsWindowVisible(h) ? ":visible " : ":hidden ")); }
+                return true;
+              }, IntPtr.Zero);
+              return list.ToString();
+            }
+          }
           '@
           function MainWindowOf([int]$procId, [int]$waitMs = 8000) {
             $until = (Get-Date).AddMilliseconds($waitMs)
             do {
-              $h = [W.U]::FindWindow($null, "Rapcha for Windows")
-              if ($h -ne [IntPtr]::Zero -and [W.U]::IsWindowVisible($h)) { $o = 0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$o); if ($o -eq $procId) { return $h } }
+              $h = [RapchaWin]::Find("Rapcha for Windows", $procId)
+              if ($h -ne [IntPtr]::Zero) { return $h }
               Start-Sleep -Milliseconds 250
             } while ((Get-Date) -lt $until)
+            "   (windows titled 'Rapcha for Windows': [" + [RapchaWin]::Owner("Rapcha for Windows") + "], expected pid $procId)" | Write-Host
             return [IntPtr]::Zero
           }
           function CloseMainWindow() {
-            $h = [W.U]::FindWindow($null, "Rapcha for Windows")
-            if ($h -ne [IntPtr]::Zero) { [void][W.U]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+            $h = [RapchaWin]::Find("Rapcha for Windows", 0)
+            if ($h -ne [IntPtr]::Zero) { [void][RapchaWin]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
             Start-Sleep -Seconds 1
-            if ([W.U]::FindWindow($null, "Rapcha for Windows") -ne [IntPtr]::Zero) { throw "The main window did not close" }
+            if ([RapchaWin]::Find("Rapcha for Windows", 0) -ne [IntPtr]::Zero) { throw "The main window did not close" }
           }
           try {
             # 1. An old v1 is running (v1 does not listen for the quit signal): the new build must close it.
