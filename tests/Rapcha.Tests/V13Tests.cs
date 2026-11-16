@@ -107,6 +107,26 @@ namespace Rapcha.Tests
             Assert.Equal(new[] { "RUN", ":app:testDebugUnitTest", "OR" }, joined);
         }
 
+        [Fact]
+        public void SentenceEndsAndListNumbersAreNotJoined()
+        {
+            var row = new List<OcrWord>
+            {
+                new OcrWord("1.", new Box(56, 166, 9, 10)), new OcrWord("Just", new Box(68, 166, 24, 10)),     // 3 px gap
+                new OcrWord("start.", new Box(93, 186, 28, 10)), new OcrWord("Nothing", new Box(124, 186, 45, 13)),
+                new OcrWord("com.", new Box(200, 186, 24, 10)), new OcrWord("example", new Box(224, 186, 40, 10)), // touching
+            };
+            Assert.Equal(new[] { "1.", "Just", "start.", "Nothing", "com.example" }, OcrMerge.JoinCodeTokens(row).Select(w => w.Text).ToArray());
+        }
+
+        [Fact]
+        public void ALongerReadingInTheSameBoxWinsOverAShorterOne()
+        {
+            OcrPass P(string name, string t, double w) { var p = new OcrPass { Name = name }; p.Lines.Add(new List<OcrWord> { new OcrWord(t, new Box(70, 304, w, 6)) }); return p; }
+            var merged = OcrMerge.Merge(new[] { P("a", "an", 14), P("b", "an", 14), P("c", "an", 14), P("d", "can", 15), P("e", "can", 15) });
+            Assert.Equal("can", merged.Lines.Single().Words.Single().Text);
+        }
+
         [Theory]
         [InlineData(":app:testDebugUnitTest", "app test Debug Unit Test")]
         [InlineData(":app:packageDebug", "app package Debug")]

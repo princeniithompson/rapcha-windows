@@ -167,7 +167,7 @@ namespace Rapcha.Win
         /// <summary>Runs the region passes; waits up to the budget, keeps the rest coming in the background.</summary>
         private async System.Threading.Tasks.Task<int> RegionAsync(Box area, int budgetMs)
         {
-            var tasks = OcrService.RegionPasses(Source, area);
+            var tasks = OcrService.RegionPasses(Source, area, _dpi);
             if (tasks.Count == 0) return 0;
             var all = System.Threading.Tasks.Task.WhenAll(tasks);
             await System.Threading.Tasks.Task.WhenAny(all, System.Threading.Tasks.Task.Delay(budgetMs));
@@ -438,7 +438,7 @@ namespace Rapcha.Win
         {
             var page = CurrentPage;
             if (page == null) return null;
-            return page.NearestLine(x, y, TapRadius) != null;
+            return page.NearestLine(x, y, S(3)) != null;   // a word right under the click; else look closer (TapPatch)
         }
 
         private void Selection(BoxSelector.Result r)

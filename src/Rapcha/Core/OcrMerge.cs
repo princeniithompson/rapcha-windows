@@ -71,7 +71,9 @@ namespace Rapcha.Core
             {
                 var passesAgreeing = new HashSet<int>();
                 foreach (var o in Near(c.Word.Box))
-                    if (o.Pass != c.Pass && o.Key == c.Key && IoU(o.Word.Box, c.Word.Box) >= SameSpotIoU) passesAgreeing.Add(o.Pass);
+                    if (o.Pass != c.Pass && IoU(o.Word.Box, c.Word.Box) >= SameSpotIoU &&
+                        (o.Key == c.Key || (c.Key.Length > o.Key.Length && o.Key.Length >= 2 && c.Key.Contains(o.Key) && IoU(o.Word.Box, c.Word.Box) >= 0.6)))
+                        passesAgreeing.Add(o.Pass); // "can" is supported by a pass that read "an" in the same box
                 c.Votes = passesAgreeing.Count;
                 c.Score = c.Votes * 100 + c.Alnum * 3 + c.Word.Text.Length + c.Priority;
             }
@@ -131,8 +133,8 @@ namespace Rapcha.Core
             return rows.Select(r => r.words.OrderBy(w => w.Box.X).ToList()).ToList();
         }
 
-        private static readonly string JoinAfter = ":_./\\-(";
-        private static readonly string JoinBefore = ":_./\\-)";
+        private static readonly string JoinAfter = ":_/\\(";
+        private static readonly string JoinBefore = ":_/\\)";
 
         /// <summary>
         /// Joins pieces of one token that OCR split: nearly touching words (gap under 0.18 of the line height), or a
@@ -153,8 +155,10 @@ namespace Rapcha.Core
                 char last = prev.Text[prev.Text.Length - 1], first = cur.Text[0];
                 bool touching = gap <= 0.18 * h && (char.IsLetterOrDigit(last) || JoinAfter.IndexOf(last) >= 0) && (char.IsLetterOrDigit(first) || JoinBefore.IndexOf(first) >= 0)
                                 && !(char.IsLetterOrDigit(last) && char.IsLetterOrDigit(first) && gap > 0.08 * h);
+                // "com." + "example": a dot joins only when the pieces touch and the next starts in lower case.
+                bool dotted = (last == '.' || last == '-') && gap <= 0.08 * h && char.IsLower(first) && prev.Text.Length >= 2 && char.IsLetter(prev.Text[prev.Text.Length - 2]);
                 bool joiner = gap <= 0.3 * h && (JoinAfter.IndexOf(last) >= 0 && last != '(' && char.IsLetterOrDigit(first) || JoinBefore.IndexOf(first) >= 0 && first != ')' && char.IsLetterOrDigit(last) && gap <= 0.12 * h);
-                if (gap >= -0.5 * h && (touching || joiner) && Math.Abs(cur.Box.CenterY - prev.Box.CenterY) <= 0.5 * h)
+                if (gap >= -0.5 * h && (touching || joiner || dotted) && Math.Abs(cur.Box.CenterY - prev.Box.CenterY) <= 0.5 * h)
                     result[result.Count - 1] = new OcrWord(prev.Text + cur.Text, prev.Box.Union(cur.Box));
                 else result.Add(cur);
             }

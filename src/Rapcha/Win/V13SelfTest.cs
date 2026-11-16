@@ -167,7 +167,7 @@ namespace Rapcha.Win
             foreach (var t in gt)
             {
                 int i = r.IndexOf(t, pos, StringComparison.Ordinal);
-                if (i >= 0 && i - pos <= 40) { hit++; pos = i + t.Length; }
+                if (i >= 0 && (hit == 0 || i - pos <= 40)) { hit++; pos = i + t.Length; }
             }
             return gt.Count == 0 ? 1 : (double)hit / gt.Count;
         }
@@ -245,7 +245,8 @@ namespace Rapcha.Win
                     var s2 = Box.FromCorners(30, lt.Bottom + 3, 820, i2.Bottom + 8);
                     var r2 = await BoxScenario(overlay, legacy, s2, Lines("item1", "item2"), "list", overlayShot: "overlay-list-box.png");
                     bool noTitle = !r2.wordsBoxes.Any(w => w.CenterY < s2.Y - 4) && !r2.words.Any(w => w == "Critical");
-                    bool order = r2.words.FindIndex(w => Norm(w) == "just") >= 0 && r2.words.FindIndex(w => Norm(w) == "just") < r2.words.FindIndex(w => Norm(w) == "before");
+                    int iJust = r2.words.FindIndex(w => Norm(w).Contains("just")), iBefore = r2.words.FindIndex(w => Norm(w).Contains("before"));
+                    bool order = iJust >= 0 && iJust < iBefore;
                     bool ok2 = r2.after >= 0.9 && noTitle && order && r2.ms >= 0 && r2.ms < 1500;
                     results.Add(("list box (two items both '1.')", s2, r2.before, r2.after, r2.ms, ok2));
                     Log("list after=" + Pct(r2.after) + " before=" + Pct(r2.before) + " no_title=" + noTitle + " items_in_order=" + order + " first_word_ms=" + r2.ms + " ok=" + ok2);

@@ -108,7 +108,8 @@ namespace Rapcha.Win
                     var full = new Rectangle(0, 0, src.W, src.H);
                     var passes = await Task.WhenAll(
                         Task.Run(() => RunPass(src, full, scale, Variant.Colour, false, "full-colour", 0)),
-                        Task.Run(() => RunPass(src, full, scale, Variant.Norm, false, "full-norm", 1))).ConfigureAwait(false);
+                        Task.Run(() => RunPass(src, full, scale, Variant.Norm, false, "full-norm", 1)),
+                        Task.Run(() => TiledPass(src, full, scale, Variant.Norm, false, "full-norm-tiles", 2, TileWidth(dpi)))).ConfigureAwait(false);
                     r.Passes.AddRange(passes.Where(p => p != null));
                     Rebuild(r);
                 }
@@ -122,7 +123,7 @@ namespace Rapcha.Win
         public static Task<OcrPass> EnhanceAsync(FrameSource src, int dpi)
         {
             double scale = dpi >= 120 ? 1.5 : 2.0;
-            return Task.Run(() => RunPass(src, new Rectangle(0, 0, src.W, src.H), scale, Variant.Norm, false, "full-norm-" + scale.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "x", 2));
+            return Task.Run(() => TiledPass(src, new Rectangle(0, 0, src.W, src.H), scale, Variant.Norm, false, "full-norm-tiles-" + scale.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "x", 3, TileWidth(dpi)));
         }
 
         // ---------------- A selection or a tap ----------------
@@ -131,7 +132,14 @@ namespace Rapcha.Win
         /// Passes over one part of the screen (a selection plus a margin, or the patch around a tap), started in
         /// parallel; each task finishes on its own so the caller can use whatever is ready in time.
         /// </summary>
-        public static List<Task<OcrPass>> RegionPasses(FrameSource src, Box area)
+        /// <summary>
+        /// Windows OCR drops words on long mixed-font lines (a green monospaced token in a line of capitals was missed
+        /// by every whole-line pass and found by every pass that saw only part of the line), so some passes look at
+        /// overlapping vertical slices this wide (480 px at 100%).
+        /// </summary>
+        public static int TileWidth(int dpi) => (int)Math.Round(480 * Math.Max(96, dpi) / 96.0);
+
+        public static List<Task<OcrPass>> RegionPasses(FrameSource src, Box area, int dpi = 96)
         {
             var rect = Rectangle.Intersect(new Rectangle((int)Math.Floor(area.X), (int)Math.Floor(area.Y), (int)Math.Ceiling(area.W) + 1, (int)Math.Ceiling(area.H) + 1),
                                            new Rectangle(0, 0, src.W, src.H));
@@ -145,6 +153,14 @@ namespace Rapcha.Win
             tasks.Add(Task.Run(() => RunPass(src, rect, s2, Variant.Colour, false, "region-colour-2x", 3)));
             if (s3 > s2 + 0.4) tasks.Add(Task.Run(() => RunPass(src, rect, s3, Variant.Norm, false, "region-norm-3x", 5)));
             tasks.Add(Task.Run(() => RunPass(src, rect, s2, Variant.Bin, false, "region-bin-2x", 2)));
+            int tile = TileWidth(dpi);
+            if (rect.Width > tile * 0.7)
+            {
+                int t2 = Math.Max(160, rect.Width / 2 + 60); // narrower slices than the box, so long lines are always cut
+                int tw = Math.Min(tile, t2);
+                tasks.Add(Task.Run(() => TiledPass(src, rect, s2, Variant.Norm, false, "region-norm-2x-tiles", 4, tw)));
+                tasks.Add(Task.Run(() => TiledPass(src, rect, s2, Variant.Colour, false, "region-colour-2x-tiles", 3, tw)));
+            }
             if (EnglishExtra()) tasks.Add(Task.Run(() => RunPass(src, rect, s2, Variant.Norm, true, "region-norm-2x-en", 3)));
             return tasks;
         }
@@ -207,6 +223,36 @@ namespace Rapcha.Win
             r.Problem = e is COMException || e is TypeLoadException || e is PlatformNotSupportedException
                 ? "Windows text recognition isn't available on this PC." : "Couldn't read the screen (" + e.GetType().Name + ").";
             AppStorage.Log("OCR failed: " + e.GetType().Name);
+        }
+
+        /// <summary>
+        /// One variant run over overlapping vertical slices of the area (overlap = 40% of a slice, so any word up to
+        /// that wide is whole in at least one slice); words touching a cut edge are left to the neighbouring slice.
+        /// </summary>
+        public static OcrPass TiledPass(FrameSource src, Rectangle rect, double scale, Variant v, bool english, string name, int priority, int tileW)
+        {
+            var t0 = DateTime.UtcNow;
+            var pass = new OcrPass { Name = name, Priority = priority, Area = new Box(rect.X, rect.Y, rect.Width, rect.Height) };
+            if (tileW <= 0 || rect.Width <= tileW) { var one = RunPass(src, rect, scale, v, english, name, priority); return one; }
+            int overlap = (int)(tileW * 0.4), step = Math.Max(1, tileW - overlap);
+            for (int x = rect.X; ; x += step)
+            {
+                int w = Math.Min(tileW, rect.Right - x);
+                var sub = new Rectangle(x, rect.Y, w, rect.Height);
+                var p = RunPass(src, sub, scale, v, english, name, priority);
+                if (p != null)
+                {
+                    double cutL = x > rect.X ? x + 2 : double.MinValue, cutR = x + w < rect.Right ? x + w - 2 : double.MaxValue;
+                    foreach (var line in p.Lines)
+                    {
+                        var keep = line.Where(word => word.Box.X > cutL && word.Box.Right < cutR).ToList();
+                        if (keep.Count > 0) pass.Lines.Add(keep);
+                    }
+                }
+                if (x + w >= rect.Right) break;
+            }
+            pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            return pass;
         }
 
         // ---------------- One pass ----------------
