@@ -78,6 +78,25 @@ jobs:
           if ($code -ne 0) { throw "Piper speak self-test failed ($code)" }
           if (-not ($lines | Select-String "finished engine=piper.*ok=True")) { throw "Reading did not use Piper" }
 
+      - name: Click-to-read self-test (Notepad line read, click swallowed, blank desktop)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $file = Join-Path $env:RUNNER_TEMP "rapcha-click.txt"
+          Set-Content -Path $file -Value "The quick brown fox jumps over the lazy dog.`r`nThis second line must not be read." -NoNewline
+          $np = Start-Process notepad.exe -ArgumentList ('"' + $file + '"') -PassThru
+          Start-Sleep -Seconds 3
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest-click "quick brown fox"' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; throw "Click self-test hung" }
+          $code = $p.ExitCode
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest click|Point:|Reading:" | Select-Object -Last 12 }
+          Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+          "Click self-test exit code: $code (0 ok, 3 Notepad check failed, 4 desktop check failed)"
+          "## Click-to-read self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "Click self-test failed ($code)" }
+
       - name: Paste self-test (Notepad, informational)
         continue-on-error: true
         shell: pwsh
