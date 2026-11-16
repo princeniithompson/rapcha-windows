@@ -59,7 +59,7 @@ jobs:
           if (Test-Path $piper) { throw "The old Piper folder was not deleted" }
           if ($code -ne 0) { throw "Overlay self-test failed ($code)" }
 
-      - name: Ring self-test (clickable hole, resting, wake tap, spinner, ring + bubble move together, four-edge docking, field outline, no-field note)
+      - name: Ring self-test (clickable hole, resting, wake tap, spinner, ring + bubble move together, four-edge docking, field outline)
         shell: pwsh
         run: |
           $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
@@ -74,7 +74,7 @@ jobs:
           $code = $p.ExitCode
           if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ring|Ring |Unhandled|Exception" | Select-Object -Last 30 }
           Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
-          "Ring self-test exit code: $code (0 ok, 11 hole, 12 resting, 13 wake tap, 14 spinner, 15 move together, 16 field outline, 17 no-field note, 18 four-edge docking)"
+          "Ring self-test exit code: $code (0 ok, 11 hole, 12 resting, 13 wake tap, 14 spinner, 15 move together, 16 field outline, 18 four-edge docking)"
           "## Ring self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "Ring self-test failed ($code)" }
 
@@ -94,12 +94,30 @@ jobs:
           "## Main window self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "Main window self-test failed ($code)" }
 
+      - name: v11 self-test (text-field detection + focus following, ring wake, one colour, 4-line words box at 100/150/200%, rounded edge glow, Space+V chords, hold to talk, conflicts, Settings Shortcuts)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v11"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v11 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(180000)) { Stop-Process -Id $p.Id -Force; throw "v11 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v11|Shortcut|Unhandled|Exception| at " | Select-Object -Last 60 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          "v11 self-test exit code: $code (0 ok, 31 Notepad not accepted, 32 pane/list/desktop not rejected, 33 outline did not move, 34 outline did not hide, 35 ring wake, 36 bubble colour, 37 bubble layout, 38 edge glow, 39 chords/lone Space, 40 hold-to-talk events, 41 conflict logic, 42 Settings shortcuts)"
+          "## v11 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v11 self-test failed ($code)" }
+
       - name: Upload main window screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rapcha-screenshots
-          path: ${{ runner.temp }}/rapcha-shots/*.png
+          path: ${{ runner.temp }}/rapcha-shots
           if-no-files-found: warn
           retention-days: 30
 
