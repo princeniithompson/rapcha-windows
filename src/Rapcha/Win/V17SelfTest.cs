@@ -268,10 +268,12 @@ namespace Rapcha.Win
             bool h1 = Snooze.Minutes == 60 && Saved() == "60";
             card.Option2h.Checked = true;
             bool h2 = Snooze.Minutes == 120 && Saved() == "120";
-            card.CustomMinutes.Value = 45;
+            card.OptionCustom.Checked = true;                       // Custom with the suggested 45 minutes
             bool custom = card.OptionCustom.Checked && Snooze.Minutes == 45 && Saved() == "45";
+            card.CustomMinutes.Value = 50;                          // then typed 50
+            custom &= Snooze.Minutes == 50 && Saved() == "50";
             Snooze.Reload();
-            bool reloaded = Snooze.Minutes == 45;
+            bool reloaded = Snooze.Minutes == 50;
             await Shot("v17-settings-snooze-custom.png", card.Status);
             card.Option19.Checked = true;
             bool back19 = Snooze.Minutes == 19;
@@ -288,9 +290,9 @@ namespace Rapcha.Win
             w.Close();
             w.Dispose();
 
-            Log("settings: shortcut_wakes=" + shortcutWakes + " default=" + def + " 1h=" + h1 + " 2h=" + h2 + " custom45=" + custom + " reloaded=" + reloaded + " back19=" + back19 + " home_bar=" + bar + " home_wakes=" + homeWakes);
+            Log("settings: shortcut_wakes=" + shortcutWakes + " default=" + def + " 1h=" + h1 + " 2h=" + h2 + " custom=" + custom + " reloaded=" + reloaded + " back19=" + back19 + " home_bar=" + bar + " home_wakes=" + homeWakes);
             _notes.Add("A voice-typing shortcut while snoozed wakes Rapcha and carries on as usual: " + shortcutWakes);
-            _notes.Add("Settings → Snooze: 19 minutes by default: " + def + "; 1 hour, 2 hours and a custom 45 minutes are saved in %AppData%\\Rapcha\\snooze-minutes.txt and read back: " + (h1 && h2 && custom && reloaded && back19));
+            _notes.Add("Settings → Snooze: 19 minutes by default: " + def + "; 1 hour, 2 hours and custom minutes (45, then 50) are saved in %AppData%\\Rapcha\\snooze-minutes.txt and read back: " + (h1 && h2 && custom && reloaded && back19));
             _notes.Add("Home while snoozed shows the time left and Wake Rapcha now, which brings the ring back: " + (bar && homeWakes));
             return shortcutWakes && def && h1 && h2 && custom && reloaded && back19 && bar && homeWakes ? 0 : 104;
         }
