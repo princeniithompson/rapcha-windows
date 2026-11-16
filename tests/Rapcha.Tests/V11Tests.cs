@@ -138,6 +138,8 @@ namespace Rapcha.Tests
         [InlineData("Ctrl+Alt+Delete", true)]
         [InlineData("Ctrl+Shift+Esc", true)]
         [InlineData("Shift+A", true)]
+        [InlineData("Space", true)]
+        [InlineData("F9", true)]
         [InlineData("Ctrl+Alt+V", false)]
         [InlineData("Ctrl+Alt+R", false)]
         [InlineData("Space+V", false)]

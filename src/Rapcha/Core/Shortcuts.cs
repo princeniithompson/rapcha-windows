@@ -213,6 +213,7 @@ namespace Rapcha.Core
                 return null;
             }
             var m = s.Mods; int k = s.Key;
+            if (m == Mods.None) return k == VK_SPACE ? "Space alone can't be a shortcut: it types a space." : KeyNames.Name(k) + " on its own would fire while you type.";
             if ((m & Mods.Win) != 0) return "Windows uses most Win+key shortcuts (Win+V is clipboard history, Win+D the desktop…). It may not reach Rapcha.";
             if (m == (Mods.Ctrl | Mods.Alt) && k == VK_DELETE) return "Ctrl+Alt+Del is reserved by Windows.";
             if (m == (Mods.Ctrl | Mods.Shift) && k == VK_ESC) return "Ctrl+Shift+Esc opens Task Manager.";
