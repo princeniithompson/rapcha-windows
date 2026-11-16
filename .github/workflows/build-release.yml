@@ -237,6 +237,25 @@ jobs:
           "## v16 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v16 self-test failed ($code)" }
 
+      - name: v17 self-test (hold-to-snooze, tray and Home wake, auto-restore, Settings snooze durations, Low laptop Whisper anyway with warning and Delete, Start menu / Search as far as the runner allows)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v17"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v17 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force; throw "v17 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v17|Snooze|Start / Search|Foreground|Delivery|Settings|Whisper|Unhandled|Exception| at " | Select-Object -Last 120 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $res = Join-Path $shots "v17-results.txt"
+          if (Test-Path $res) { Get-Content $res; "## v17 snooze, Low-laptop Whisper, Start menu" >> $env:GITHUB_STEP_SUMMARY; Get-Content $res | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY }
+          "v17 self-test exit code: $code (0 ok, 101 snooze gesture, 102 tray, 103 auto-restore, 104 shortcut / settings / Home, 105 Low Whisper, 107 normal targets)"
+          "## v17 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v17 self-test failed ($code)" }
+
       - name: Upload main window screenshots
         if: always()
         uses: actions/upload-artifact@v4
