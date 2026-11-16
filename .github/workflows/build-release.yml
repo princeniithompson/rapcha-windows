@@ -31,7 +31,7 @@ jobs:
       - name: Build Rapcha.exe
         run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
 
-      - name: Select-to-speak overlay self-test (OCR, box/two-click/tap selection, two-column book order, SAPI word progress, Piper cleanup)
+      - name: Select-to-speak overlay self-test (OCR, box/two-click/tap selection, two-column book order, SAPI word progress, ring tap while reading, Piper cleanup)
         shell: pwsh
         run: |
           $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
@@ -54,7 +54,7 @@ jobs:
           $code = $p.ExitCode
           if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ocr|Overlay|OCR|Piper|piper|Voice|capture|Unhandled|Exception| at " | Select-Object -Last 40 }
           Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
-          "Overlay self-test exit code: $code (0 ok, 2 no voice, 3 words not recognised, 4 selection/reading wrong, 5 close/cleanup failed, 6 no OCR language, 7 two-column page out of order)"
+          "Overlay self-test exit code: $code (0 ok, 2 no voice, 3 words not recognised, 4 selection/reading wrong, 5 close/cleanup failed, 6 no OCR language, 7 two-column page out of order, 8 a ring tap while reading started voice typing)"
           "## Select-to-speak overlay self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if (Test-Path $piper) { throw "The old Piper folder was not deleted" }
           if ($code -ne 0) { throw "Overlay self-test failed ($code)" }
@@ -111,6 +111,24 @@ jobs:
           "v11 self-test exit code: $code (0 ok, 31 Notepad not accepted, 32 pane/list/desktop not rejected, 33 outline did not move, 34 outline did not hide, 35 ring wake, 36 bubble colour, 37 bubble layout, 38 edge glow, 39 chords/lone Space, 40 hold-to-talk events, 41 conflict logic, 42 Settings shortcuts)"
           "## v11 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v11 self-test failed ($code)" }
+
+      - name: v12 self-test (all Windows voices listed, reading with the chosen OneCore/SAPI voice, fallback, Settings voice picker + Preview, typing keeps the ring awake, smooth wake)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v12"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v12 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(240000)) { Stop-Process -Id $p.Id -Force; throw "v12 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v12|Voices|OneCore|Ring: woke|Ring resting|Typing watcher|Unhandled|Exception| at " | Select-Object -Last 70 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          "v12 self-test exit code: $code (0 ok, 51 no voices, 52 reading with a voice, 53 fallback, 54 Settings voice picker, 55 typing did not wake, 56 wake animation not smooth, 57 typing did not keep it awake, 58 typing without a text field woke it)"
+          "## v12 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v12 self-test failed ($code)" }
 
       - name: Upload main window screenshots
         if: always()
