@@ -53,7 +53,9 @@ namespace Rapcha.Win
         private bool _previewStrong;
         private readonly System.Windows.Forms.Timer _previewTimer = new System.Windows.Forms.Timer { Interval = PreviewMs };
         private List<OcrWord> _pendingWords;
-        public bool Previewing => _previewTimer.Enabled;
+        /// <summary>A selection is being prepared: sharper passes running, or the snapped text shown before reading.</summary>
+        public bool Previewing => _previewTimer.Enabled || _preparing > 0;
+        private int _preparing;
         public int PreviewParts { get; private set; }
 
         public string LastReadText { get; private set; } = "";
@@ -197,7 +199,10 @@ namespace Rapcha.Win
             TapPatches++;
             var patch = new Box(x - S(300), y - S(100), S(600), S(200));
             var t0 = DateTime.UtcNow;
-            int got = await RegionAsync(patch, TapPatchBudgetMs);
+            int got;
+            _preparing++;
+            try { got = await RegionAsync(patch, TapPatchBudgetMs); }
+            finally { _preparing--; }
             var page = CurrentPage;
             var line = page?.NearestLine(x, y, TapRadius);
             AppStorage.Log("Overlay tap patch: passes=" + got + " found=" + (line != null) + " ms=" + (int)(DateTime.UtcNow - t0).TotalMilliseconds);
@@ -229,7 +234,10 @@ namespace Rapcha.Win
             var t0 = DateTime.UtcNow;
             _waitBox = box; Invalidate(BoxRect(box.Inflate(S(6))));
             // Sharper passes on the box plus a margin (2x/3x, inverted, thresholded), merged with the whole screen.
-            int used = await RegionAsync(box.Inflate(S(14)), _ocr == null ? 3000 : RegionBudgetMs);
+            int used;
+            _preparing++;
+            try { used = await RegionAsync(box.Inflate(S(14)), _ocr == null ? 3000 : RegionBudgetMs); }
+            finally { _preparing--; }
             if (IsDisposed || gen != _selGen) return;
             Invalidate(BoxRect(box.Inflate(S(6)))); _waitBox = new Box();
             RegionPassesUsed = used;
