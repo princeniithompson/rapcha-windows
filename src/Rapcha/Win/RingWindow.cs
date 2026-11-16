@@ -122,7 +122,7 @@ namespace Rapcha.Win
             Poke();
         }
 
-        private void UpdateAnim() => _anim.Enabled = _state != RingState.Idle || _selectMode || Math.Abs(_rest - _restTarget) > 0.001;
+        private void UpdateAnim() => _anim.Enabled = _state != RingState.Idle || Math.Abs(_rest - _restTarget) > 0.001;
 
         /// <summary>Something happened: restart the countdown to resting.</summary>
         public void Poke()
@@ -175,7 +175,7 @@ namespace Rapcha.Win
             if (Math.Abs(_rest - _restTarget) <= 0.0005)
             {
                 _rest = _restTarget;
-                if (_state == RingState.Idle && !_selectMode) _anim.Enabled = false;
+                if (_state == RingState.Idle) _anim.Enabled = false;
             }
         }
 
@@ -251,8 +251,18 @@ namespace Rapcha.Win
         public void Render()
         {
             if (IsDisposed) return;
+            int glow = Glow;
+            using (var bmp = Compose()) Present(bmp, _ringX - glow, _ringY - glow);
+        }
+
+        /// <summary>The ring as it would be drawn right now (also used by the self-test to compare frames).</summary>
+        /// <summary>Is the animation timer running (it should not be while select to speak is merely on).</summary>
+        public bool Animating => _anim.Enabled;
+
+        public Bitmap Compose()
+        {
             int ring = RingSize, glow = Glow, size = ring + glow * 2;
-            using (var bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            var bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
                 g.Clear(Color.Transparent);
@@ -285,17 +295,7 @@ namespace Rapcha.Win
                     }
                 }
 
-                if (_selectMode && _state == RingState.Idle)
-                {
-                    double t = (DateTime.UtcNow - _born).TotalSeconds;
-                    double breath = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 2.4);
-                    float w = Math.Max(2f, glow * 0.45f);
-                    float inset = glow * 0.35f;
-                    using (var halo = new Pen(Color.FromArgb((int)(90 + 80 * breath), Accent.Lighter(0.35)), w))
-                        g.DrawEllipse(halo, inset, inset, size - inset * 2, size - inset * 2);
-                    using (var arc = new Pen(Color.FromArgb(235, Accent.Lighter(0.8)), w) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                        g.DrawArc(arc, inset, inset, size - inset * 2, size - inset * 2, (float)((t * 120) % 360), 70f);
-                }
+                // Select to speak: no ring decoration at all (the steady screen-edge glow says it is on).
 
                 var rr = DrawRectF(ring, glow);
                 FrameLog?.Add(rr.Width);
@@ -345,8 +345,8 @@ namespace Rapcha.Win
                         g.DrawArc(pen, inset, inset, size - inset * 2, size - inset * 2, start, sweep);
                     }
                 }
-                Present(bmp, _ringX - glow, _ringY - glow);
             }
+            return bmp;
         }
 
         protected override void OnMouseDown(MouseEventArgs e)

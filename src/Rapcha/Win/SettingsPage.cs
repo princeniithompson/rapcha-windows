@@ -29,7 +29,13 @@ namespace Rapcha.Win
         private readonly ComboBox _voice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430, Font = new Font(Theme.Sans, 10f) };
         private readonly PillButton _previewVoice = new PillButton { Text = "Preview" };
         private readonly Label _voiceHint = new Label();
-        private FlowLayoutPanel _voiceRow;
+        private FlowLayoutPanel _voiceRow, _editRow;
+        private readonly PillButton _editVoice = new PillButton { Text = "Edit" };
+        private readonly PillButton _resetVoice = new PillButton { Text = "Reset" };
+        private readonly Label _lockNote = new Label();
+        private bool _voiceLocked = true, _haveVoices;
+        private string _pendingVoiceId;
+        private double _pendingSpeed = VoiceSettings.Speed;
         private IReadAloud _preview;
         private bool _loadingVoices;
         /// <summary>Self-test: Preview speaks into memory instead of the speakers.</summary>
@@ -118,7 +124,13 @@ namespace Rapcha.Win
             _speedLabel.AutoSize = true;
             _speedLabel.Anchor = AnchorStyles.Left;
             _speedLabel.BackColor = Color.White;
-            _speed.ValueChanged += (s, e) => { VoiceSettings.Speed = _speed.Value / 10.0; ShowSpeed(); };
+            _speed.ValueChanged += (s, e) =>
+            {
+                ShowSpeed();
+                if (_loadingVoices) return;
+                _pendingSpeed = _speed.Value / 10.0;
+                VoiceSettings.Override = _pendingSpeed;   // Preview hears it; saved on Done
+            };
             ShowSpeed();
             speedRow.Controls.Add(_speed, 0, 0);
             speedRow.Controls.Add(_speedLabel, 1, 0);
@@ -150,7 +162,7 @@ namespace Rapcha.Win
                 _shortcuts));
             _layout.Controls.Add(Card("Select to speak",
                 Help("Double-click the ring, then drag a box around any text on the screen (or tap a word) to hear it. Esc closes."),
-                _voiceRow, _voiceHint, speedRow));
+                _editRow, _voiceRow, _voiceHint, speedRow));
             _layout.Controls.Add(Card("Help",
                 Help("The log has no key and none of your words."), Row(_copyLog)));
             _layout.RowCount = _layout.Controls.Count;
@@ -189,6 +201,7 @@ namespace Rapcha.Win
                 StopMeter();
                 _meterCheck.Dispose();
                 try { _preview?.Dispose(); } catch { }
+                if (!_voiceLocked) { VoiceSettings.Override = null; AppStorage.Log("Settings: select to speak edit closed without Done (not saved)"); }
             }
             base.Dispose(disposing);
         }
@@ -211,10 +224,18 @@ namespace Rapcha.Win
             _voice.SelectedIndexChanged += (s, e) =>
             {
                 if (_loadingVoices || !(_voice.SelectedItem is VoiceEntry v)) return;
-                Voices.SavedId = v.Id;
-                AppStorage.Log("Voices: chosen " + v.Label + (v.Desktop ? " [SAPI]" : " [OneCore]"));
+                _pendingVoiceId = v.Id;   // saved on Done
             };
             _previewVoice.Click += (s, e) => PreviewVoice();
+            _editVoice.Click += (s, e) => { if (_voiceLocked) UnlockSelectToSpeak(); else SaveSelectToSpeak(); };
+            _resetVoice.Click += (s, e) => ResetSelectToSpeak();
+            _editRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Margin = new Padding(0, 6, 0, 2), WrapContents = false };
+            _editVoice.Margin = new Padding(0, 0, 10, 0);
+            _editRow.Controls.Add(_editVoice);
+            _editRow.Controls.Add(_resetVoice);
+            _lockNote.AutoSize = true; _lockNote.ForeColor = Theme.Muted; _lockNote.BackColor = Color.White; _lockNote.Margin = new Padding(8, 8, 0, 0);
+            _editRow.Controls.Add(_lockNote);
+            ApplyVoiceLock();
         }
 
         /// <summary>Fills the list (all OneCore + SAPI voices) and selects the saved one, or the Windows default.</summary>
@@ -231,11 +252,74 @@ namespace Rapcha.Win
                 if (i < 0) { var def = Voices.DefaultSapiId(); i = all.FindIndex(v => v.Id == def); }
                 if (i < 0 && all.Count > 0) i = 0;
                 if (i >= 0) _voice.SelectedIndex = i;
-                _voice.Enabled = _previewVoice.Enabled = all.Count > 0;
+                _haveVoices = all.Count > 0;
+                ApplyVoiceLock();
                 if (all.Count == 0) _voiceHint.Text = "No Windows voice is installed. Add one in Windows Settings > Time & Language > Speech > Add voices.";
                 AppStorage.Log("Voices: listed " + all.Count + " (onecore=" + all.FindAll(v => !v.Desktop).Count + ", sapi=" + all.FindAll(v => v.Desktop).Count + ")");
             }
             finally { _loadingVoices = false; }
+        }
+
+        // ---- Select to speak: locked until Edit; Done saves; Reset restores only these settings ----
+
+        internal bool VoiceLocked => _voiceLocked;
+        internal PillButton EditVoiceButton => _editVoice;
+        internal PillButton ResetVoiceButton => _resetVoice;
+        internal TrackBar SpeedSlider => _speed;
+        /// <summary>Asks before Reset (the self-test answers for the user).</summary>
+        internal static Func<bool> ConfirmReset = () =>
+            MessageBox.Show("Reset select to speak to its defaults?\n\nVoice: Windows default\nSpeed: 1.0×\n\nOther settings are not changed.",
+                            "Rapcha", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+
+        private void ApplyVoiceLock()
+        {
+            bool on = !_voiceLocked;
+            _voice.Enabled = on && _haveVoices;
+            _previewVoice.Enabled = on && _haveVoices;
+            _speed.Enabled = on;
+            _editVoice.Text = _voiceLocked ? "Edit" : "Done";
+            _editVoice.Primary = !_voiceLocked;
+            _lockNote.Text = _voiceLocked ? "Locked. Press Edit to change the voice or speed." : "Editing: press Done to save.";
+            _editVoice.Invalidate();
+        }
+
+        internal void UnlockSelectToSpeak()
+        {
+            _voiceLocked = false;
+            _pendingVoiceId = (_voice.SelectedItem as VoiceEntry)?.Id;
+            _pendingSpeed = _speed.Value / 10.0;
+            ApplyVoiceLock();
+            AppStorage.Log("Settings: select to speak unlocked for editing");
+        }
+
+        internal void SaveSelectToSpeak()
+        {
+            if (_pendingVoiceId != null) Voices.SavedId = _pendingVoiceId;
+            VoiceSettings.Override = null;
+            VoiceSettings.Speed = _pendingSpeed;
+            var v = _voice.SelectedItem as VoiceEntry;
+            AppStorage.Log("Settings: select to speak saved: voice " + (v != null ? v.Label + (v.Desktop ? " [SAPI]" : " [OneCore]") : "default") +
+                           " speed " + VoiceSettings.Speed.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+            _voiceLocked = true;
+            ApplyVoiceLock();
+        }
+
+        internal void ResetSelectToSpeak()
+        {
+            if (!ConfirmReset()) { AppStorage.Log("Settings: select to speak reset cancelled"); return; }
+            try { _preview?.Dispose(); } catch { }
+            _preview = null;
+            Voices.SavedId = "";
+            VoiceSettings.Override = null;
+            VoiceSettings.Speed = VoiceSettings.DefaultSpeed;
+            _loadingVoices = true;
+            try { _speed.Value = (int)Math.Round(VoiceSettings.DefaultSpeed * 10); } finally { _loadingVoices = false; }
+            _pendingSpeed = VoiceSettings.DefaultSpeed;
+            LoadVoices();
+            _pendingVoiceId = null;
+            _voiceLocked = true;
+            ApplyVoiceLock();
+            AppStorage.Log("Settings: select to speak reset to defaults");
         }
 
         private void PreviewVoice()

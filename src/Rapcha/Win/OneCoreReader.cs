@@ -101,48 +101,83 @@ namespace Rapcha.Win
             if (_player != null) { try { _player.Dispose(); } catch { } _player = null; }
         }
 
+        private sealed class Chunk
+        {
+            public int First, End;          // plan words [First, End)
+            public int BaseChar;
+            public byte[] Wav;
+            public double[] CueMs;
+            public int[] CueChar;           // relative to BaseChar
+            public bool Cues;
+        }
+
+        /// <summary>The first piece is short so speech starts fast; later pieces are longer.</summary>
+        public const int FirstChunkWords = 8, ChunkWords = 40;
+        private Task<Chunk> _next;
+        private int _chunkEnd;
+
+        /// <summary>Plan words [first, end) for the piece starting at first: whole phrases, at least minWords.</summary>
+        private int ChunkEnd(int first, int minWords)
+        {
+            int end = first;
+            foreach (var ph in Plan.Phrases)
+            {
+                if (ph.EndWord <= first) continue;
+                end = ph.EndWord;
+                if (end - first >= minWords) break;
+            }
+            return Math.Max(first + 1, Math.Min(Plan.Words.Count, end));
+        }
+
+        private async Task<Chunk> Synthesize(int first, int end)
+        {
+            var c = new Chunk { First = first, End = end, BaseChar = Plan.Words[first].Start };
+            int endChar = Plan.Words[end - 1].End;
+            string text = Plan.Text.Substring(c.BaseChar, endChar - c.BaseChar);
+            var cueMs = new List<double>();
+            var cueChar = new List<int>();
+            var synth = Synth();
+            try { synth.Options.SpeakingRate = VoiceSettings.Speed; } catch { }   // Windows 10 1803+
+            using (var stream = await synth.SynthesizeTextToStreamAsync(text).AsTask())
+            {
+                try
+                {
+                    foreach (var track in stream.TimedMetadataTracks)
+                    {
+                        if (track.Id != "SpeechWord") continue;
+                        foreach (var cue in track.Cues.OfType<SpeechCue>())
+                        {
+                            if (!cue.StartPositionInInput.HasValue) continue;
+                            cueMs.Add(cue.StartTime.TotalMilliseconds);
+                            cueChar.Add(cue.StartPositionInInput.Value);
+                        }
+                    }
+                }
+                catch { cueMs.Clear(); cueChar.Clear(); }
+                c.Wav = new byte[(int)stream.Size];
+                using (var input = stream.GetInputStreamAt(0))
+                using (var reader = new DataReader(input))
+                {
+                    await reader.LoadAsync((uint)stream.Size).AsTask();
+                    reader.ReadBytes(c.Wav);
+                }
+            }
+            c.Cues = cueMs.Count > 0;
+            c.CueMs = cueMs.ToArray();
+            c.CueChar = cueChar.ToArray();
+            return c;
+        }
+
         private async Task StartAt(int word)
         {
             int gen = ++_gen;
             StopPlayer();
+            _next = null;
             CurrentWord = word;
-            _baseChar = Plan.Words[word].Start;
             Status = ReadState.Preparing;
             Changed?.Invoke();
-            string text = Plan.TextFrom(word);
-            byte[] wav;
-            var cueMs = new List<double>();
-            var cueChar = new List<int>();
-            try
-            {
-                var synth = Synth();
-                try { synth.Options.SpeakingRate = VoiceSettings.Speed; } catch { }   // Windows 10 1803+
-                using (var stream = await synth.SynthesizeTextToStreamAsync(text).AsTask())
-                {
-                    if (gen != _gen) return;
-                    try
-                    {
-                        foreach (var track in stream.TimedMetadataTracks)
-                        {
-                            if (track.Id != "SpeechWord") continue;
-                            foreach (var cue in track.Cues.OfType<SpeechCue>())
-                            {
-                                if (!cue.StartPositionInInput.HasValue) continue;
-                                cueMs.Add(cue.StartTime.TotalMilliseconds);
-                                cueChar.Add(cue.StartPositionInInput.Value);
-                            }
-                        }
-                    }
-                    catch { cueMs.Clear(); cueChar.Clear(); }
-                    wav = new byte[(int)stream.Size];
-                    using (var input = stream.GetInputStreamAt(0))
-                    using (var reader = new DataReader(input))
-                    {
-                        await reader.LoadAsync((uint)stream.Size).AsTask();
-                        reader.ReadBytes(wav);
-                    }
-                }
-            }
+            Chunk first;
+            try { first = await Synthesize(word, ChunkEnd(word, FirstChunkWords)); }
             catch (Exception e)
             {
                 if (gen != _gen) return;
@@ -152,8 +187,12 @@ namespace Rapcha.Win
                 return;
             }
             if (gen != _gen) return;
+            Play(first);
+        }
 
-            try { _player = new WaveOutPlayer(wav, _silent); }
+        private void Play(Chunk c)
+        {
+            try { _player = new WaveOutPlayer(c.Wav, _silent); }
             catch (Exception e)
             {
                 AppStorage.Log("OneCore playback failed: " + e.Message);
@@ -161,18 +200,27 @@ namespace Rapcha.Win
                 Changed?.Invoke();
                 return;
             }
-            UsedWordCues = cueMs.Count > 0;
-            LastCueCount = cueMs.Count;
-            if (!UsedWordCues)
+            _baseChar = c.BaseChar;
+            _chunkEnd = c.End;
+            UsedWordCues = c.Cues;
+            LastCueCount = c.CueMs.Length;
+            if (c.Cues) { _cueMs = c.CueMs; _cueChar = c.CueChar; }
+            else
             {
                 // No word marks from this voice: spread the audio over the words by their length.
-                var words = Plan.Words.Skip(word).ToList();
-                var starts = VoiceLabels.EstimateStarts(words.Select(w => w.Length).ToList(), _player.DurationMs);
-                cueMs = starts.ToList();
-                cueChar = words.Select(w => w.Start - _baseChar).ToList();
+                var words = Plan.Words.Skip(c.First).Take(c.End - c.First).ToList();
+                _cueMs = VoiceLabels.EstimateStarts(words.Select(w => w.Length).ToList(), _player.DurationMs).ToArray();
+                _cueChar = words.Select(w => w.Start - _baseChar).ToArray();
             }
-            _cueMs = cueMs.ToArray();
-            _cueChar = cueChar.ToArray();
+            // Prepare the next piece while this one plays.
+            if (c.End < Plan.Words.Count)
+            {
+                int gen = _gen;
+                int nf = c.End, ne = ChunkEnd(c.End, ChunkWords);
+                _next = Synthesize(nf, ne);
+                _next.ContinueWith(t => { if (t.IsFaulted) AppStorage.Log("OneCore voice failed (next piece): " + t.Exception?.InnerException?.GetType().Name); }, TaskContinuationOptions.OnlyOnFaulted);
+            }
+            else _next = null;
             _player.Play();
             Status = ReadState.Playing;
             Changed?.Invoke();
@@ -192,6 +240,14 @@ namespace Rapcha.Win
             }
             if (_player.Done)
             {
+                if (_next != null)
+                {
+                    if (!_next.IsCompleted) return;               // the next piece is nearly ready: keep waiting
+                    var next = _next;
+                    _next = null;
+                    StopPlayer();
+                    if (next.Status == TaskStatus.RanToCompletion) { Play(next.Result); return; }
+                }
                 StopPlayer();
                 CurrentWord = Plan.Words.Count - 1;
                 Status = ReadState.Finished;

@@ -541,7 +541,7 @@ namespace Rapcha.Win
                            " glow_windows=" + _glow.WindowCount + " capture_ms=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
 
             Task<OcrService.Result> ocr;
-            try { ocr = OcrService.RecognizeAsync(shot, dpi); } // copies the pixels before returning
+            try { ocr = OcrService.RecognizeAsync(overlay.Source, dpi); } // the overlay keeps a copy of the pixels
             finally { shot.Dispose(); }
             ocr.ContinueWith(t =>
             {

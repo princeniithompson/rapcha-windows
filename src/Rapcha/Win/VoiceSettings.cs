@@ -14,11 +14,17 @@ namespace Rapcha.Win
         private static double _speed = double.NaN;
         private static string SpeedPath => Path.Combine(AppStorage.Folder, "voice-speed.txt");
 
+        /// <summary>While Settings → Select to speak is being edited: the unsaved speed (Preview uses it).</summary>
+        public static double? Override;
+
+        public const double DefaultSpeed = 1.0;
+
         /// <summary>0.7x to 1.5x; mapped to SAPI Rate -3..+5 (Rate 0 = normal).</summary>
         public static double Speed
         {
             get
             {
+                if (Override.HasValue) return Clamp(Override.Value);
                 if (double.IsNaN(_speed))
                 {
                     _speed = 1.0;

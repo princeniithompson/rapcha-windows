@@ -145,13 +145,13 @@ namespace Rapcha.Win
                 if (c is ScrollableControl sc && sc.AutoScroll) { sc.ScrollControlIntoView(picker.Parent.Parent ?? picker); break; }
             await Task.Delay(300);
             var want = all.FirstOrDefault(v => !v.Desktop) ?? all.First();
+            w.Settings.UnlockSelectToSpeak();   // v13: the section is locked until Edit
             picker.SelectedItem = picker.Items.Cast<VoiceEntry>().First(v => v.Id == want.Id);
             await Task.Delay(200);
-            bool saved = Voices.SavedId == want.Id;
             w.Settings.PreviewButton.PerformClick();
             var prev = w.Settings.LastPreview;
             bool previewOk = prev != null && prev.VoiceName == want.FullName && await WaitFor(() => prev.Status == ReadState.Finished, 20000) && prev.ProgressEvents > 0;
-            Log("settings items=" + picker.Items.Count + " default_selected=" + defaultShown + " chose=\"" + want.Label + "\" saved=" + saved +
+            Log("settings items=" + picker.Items.Count + " default_selected=" + defaultShown + " chose=\"" + want.Label + "\"" +
                 " preview_engine=" + prev?.GetType().Name + " preview_ok=" + previewOk);
             await Task.Delay(300);
             w.SavePng(Path.Combine(_out, "settings-voice.png"));
@@ -162,6 +162,9 @@ namespace Rapcha.Win
             var shotArea = Rectangle.Intersect(Screen.PrimaryScreen.Bounds, new Rectangle(r.X, r.Y, r.Width, r.Height + 260));
             using (var bmp = V11SelfTest.Capture(shotArea)) bmp.Save(Path.Combine(_out, "settings-voice-list.png"), ImageFormat.Png);
             picker.DroppedDown = false;
+            w.Settings.SaveSelectToSpeak();     // Done saves
+            bool saved = Voices.SavedId == want.Id;
+            Log("settings saved_on_done=" + saved);
             // Reopening Settings shows the saved voice.
             w.Settings.LoadVoices();
             bool reloaded = picker.SelectedItem is VoiceEntry d1 && d1.Id == want.Id;

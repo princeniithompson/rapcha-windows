@@ -167,7 +167,7 @@ namespace Rapcha.Core
             {
                 if (i > 0) sb.Append(words[i].Line != words[i - 1].Line ? "\n" : " ");
                 _starts[i] = sb.Length;
-                sb.Append(words[i].Text);
+                sb.Append(Speakable.For(words[i].Text)); // code tokens are said as words; the box stays on the token
                 // End of a heading, list item or card text: add a full stop (inside the same word) so the voice pauses.
                 bool blockEnd = i == words.Count - 1 || words[i + 1].Block != words[i].Block;
                 if (blockEnd && words[i].Block >= 0 && i < words.Count - 1 && !EndsSentence(words[i].Text)) sb.Append('.');

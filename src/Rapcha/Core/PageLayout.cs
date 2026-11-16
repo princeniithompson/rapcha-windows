@@ -271,7 +271,61 @@ namespace Rapcha.Core
         /// Exception first: a box drawn tightly around whole lines (lines at least 90% inside whose own area fills
         /// at least 50% of the box) reads exactly those lines, even if that is half of a short paragraph.
         /// </summary>
+        // Selection rules (v13, see Snap).
+        public const double LineVertical = 0.3;   // a line counts when the box covers at least 30% of its height
+        public const double WordHorizontal = 0.4; // a word counts when 40% of its width (or its centre) is inside
+        public const double CompleteLine = 0.75;  // a line whose text is 75% inside is completed
+
+        /// <summary>
+        /// What a user's box reads, in reading order (blocks in page order: columns left to right, top to bottom;
+        /// lines top to bottom inside each block; words left to right).
+        /// - Never outside the box: a line takes part only when the box covers at least <see cref="LineVertical"/> of
+        ///   its height, and on such a line only words whose centre is inside the box's width (with a small
+        ///   tolerance) or that are at least <see cref="WordHorizontal"/> inside are read. A separate block above or
+        ///   below (a title) is never pulled in.
+        /// - Never a dropped line: every line that meets the rule above is read, however little of its block is in
+        ///   the box.
+        /// - Snap only expands inside the box's own lines: a cut word is read whole, and a line whose text is at
+        ///   least <see cref="CompleteLine"/> inside is read whole.
+        /// </summary>
         public List<SnapPart> Snap(Box sel)
+        {
+            var parts = new List<SnapPart>();
+            if (sel.IsEmpty) return parts;
+            foreach (var b in Blocks)
+            {
+                if (b.Box.Intersect(sel.Inflate(2)).IsEmpty) continue;
+                SnapPart part = null;
+                int fullLines = 0;
+                double blockArea = 0, insideArea = 0;
+                foreach (var l in b.Lines) // already rows top to bottom, left to right
+                {
+                    foreach (var w in l.Words) { blockArea += w.Box.Area; insideArea += w.Box.Intersect(sel).Area; }
+                    double vo = Math.Min(l.Box.Bottom, sel.Bottom) - Math.Max(l.Box.Y, sel.Y);
+                    if (l.Box.H <= 0 || vo < LineVertical * l.Box.H) continue;
+                    double tol = Math.Max(3, 0.3 * l.Box.H);
+                    var ws = l.Words.Where(w =>
+                        (w.Box.CenterX >= sel.X - tol && w.Box.CenterX <= sel.Right + tol) ||
+                        (w.Box.W > 0 && (Math.Min(w.Box.Right, sel.Right) - Math.Max(w.Box.X, sel.X)) >= WordHorizontal * w.Box.W)).ToList();
+                    if (ws.Count == 0) continue;
+                    double all = l.Words.Sum(w => w.Box.W), got = ws.Sum(w => w.Box.W);
+                    if (ws.Count < l.Words.Count && all > 0 && got >= CompleteLine * all) ws = l.Words.ToList();
+                    if (ws.Count == l.Words.Count) fullLines++;
+                    if (part == null) part = new SnapPart { Block = b };
+                    part.Words.AddRange(ws.OrderBy(w => w.Box.X));
+                }
+                if (part == null) continue;
+                part.Kind = fullLines == b.Lines.Count ? SnapKind.Whole : part.Words.Count > 0 && fullLines > 0 ? SnapKind.Lines : SnapKind.Words;
+                part.AreaCoverage = blockArea > 0 ? insideArea / blockArea : 0;
+                part.LineCoverage = (double)fullLines / b.Lines.Count;
+                part.Box = part.Kind == SnapKind.Whole ? b.Box : part.Words.Aggregate(new Box(), (s, w) => s.Union(w.LineBox.IsEmpty ? w.Box : new Box(w.Box.X, w.LineBox.Y, w.Box.W, w.LineBox.H)));
+                parts.Add(part);
+            }
+            return parts;
+        }
+
+        /// <summary>The v12 snap rules (kept only so the self-test can measure before/after recall).</summary>
+        public List<SnapPart> SnapLegacy(Box sel)
         {
             var parts = new List<SnapPart>();
             if (sel.IsEmpty) return parts;
@@ -377,6 +431,22 @@ namespace Rapcha.Core
                 foreach (var w in l.Words)
                     if (w.Box.Inflate(slop).Contains(x, y)) return l;
             return null;
+        }
+
+        /// <summary>The line of the word nearest to a point (a tap), if that word is within maxDist; else null.</summary>
+        public TextLine NearestLine(double x, double y, double maxDist)
+        {
+            TextLine best = null;
+            double bestD = double.MaxValue;
+            foreach (var l in Lines)
+                foreach (var w in l.Words)
+                {
+                    double dx = Math.Max(0, Math.Max(w.Box.X - x, x - w.Box.Right));
+                    double dy = Math.Max(0, Math.Max(w.Box.Y - y, y - w.Box.Bottom));
+                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    if (d < bestD) { bestD = d; best = l; }
+                }
+            return bestD <= maxDist ? best : null;
         }
 
         public TextBlock BlockOf(TextLine line) => Blocks.FirstOrDefault(b => b.Lines.Contains(line));

@@ -105,16 +105,16 @@ namespace Rapcha.Tests
         }
 
         [Fact]
-        public void MostlyCoveredParagraphSnapsToTheWholeParagraph()
+        public void BoxEndingAboveTheLastLineNeverReadsIt()
         {
+            // v13: nothing outside the box. The box ends above the paragraph's last line: every line it covers is read,
+            // in order, and the last line is not (v12 snapped to the whole paragraph and read it too).
             var page = PageLayout.Analyze(Sidebar());
-            var parts = page.Snap(new Box(1090, 90, 320, 146)); // ends above the paragraph's last line
+            var parts = page.Snap(new Box(1090, 90, 320, 146));
             var text = string.Join(" ", PageLayout.WordsOf(parts).Select(w => w.Text));
-            Assert.Equal("Gemini 4 Hydrogen Gemini 4 Hydrogen Our most capable model for complex reasoning, coding and long documents with a large context window and fast responses at a lower price.", text);
-            var para = parts.Last();
-            Assert.Equal(SnapKind.Whole, para.Kind);
-            Assert.Equal(4, para.Block.Lines.Count);
-            Assert.True(para.Box.Bottom >= 254); // the preview outline shows the line below the box too
+            Assert.Equal("Gemini 4 Hydrogen Gemini 4 Hydrogen Our most capable model for complex reasoning, coding and long documents with a large context window and fast", text);
+            Assert.Equal("Gemini 4 Hydrogen Gemini 4 Hydrogen Our most capable model for complex reasoning, coding and long documents with a large context window and fast responses at a lower price.",
+                         string.Join(" ", PageLayout.WordsOf(page.SnapLegacy(new Box(1090, 90, 320, 146))).Select(w => w.Text)));
         }
 
         [Fact]
@@ -187,8 +187,12 @@ namespace Rapcha.Tests
             var page = PageLayout.Analyze(l);
             Assert.Single(page.Blocks);
             Assert.Equal("The quick brown fox jumps over the lazy dog.", Read(page, new Box(6, 6, 375, 24)));
-            // A loose box over the same line covers half the paragraph: the whole paragraph is read.
-            Assert.EndsWith("must not be read.", Read(page, new Box(0, 0, 600, 27)));
+            // A loose box over the same line still never reads the line below it (v12 read the whole paragraph).
+            Assert.Equal("The quick brown fox jumps over the lazy dog.", Read(page, new Box(0, 0, 600, 27)));
+            // The box clips the top of the second line by 4 px (25% of its height): still only the first line.
+            Assert.Equal("The quick brown fox jumps over the lazy dog.", Read(page, new Box(0, 0, 600, 36)));
+            // The box covers half of the second line: both lines, in order.
+            Assert.Equal("The quick brown fox jumps over the lazy dog. This second line must not be read.", Read(page, new Box(0, 0, 600, 40)));
         }
 
         [Fact]

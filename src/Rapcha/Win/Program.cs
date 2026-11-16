@@ -50,6 +50,15 @@ namespace Rapcha.Win
                 Application.Run(new V11SelfTest(args[1]));
                 return;
             }
+            if (args.Length >= 2 && args[0] == "--selftest-v13")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new V13SelfTest(args[1]));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-v12")
             {
                 Application.EnableVisualStyles();
