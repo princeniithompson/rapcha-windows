@@ -18,7 +18,7 @@ namespace Rapcha.Win
         public const int GapDip = 6;
 
         private static readonly Image Lifebuoy = LoadLifebuoy();
-        private readonly Timer _anim = new Timer { Interval = 33 };
+        private readonly Timer _anim = new Timer { Interval = 15 };
         private readonly Timer _topmost = new Timer { Interval = 2000 };
         private readonly DateTime _born = DateTime.UtcNow;
 
@@ -48,11 +48,18 @@ namespace Rapcha.Win
         // Resting: after a while with nothing to do the ring shrinks to 60% and dims, still docked at the edge.
         public const double RestScale = 0.6;
         public const double RestOpacity = 0.45;
-        private const double RestAnimMs = 320;
+        public const double WakeAnimMs = 220, RestAnimMs = 320;
         private readonly Timer _restTimer = new Timer { Interval = 10000 };
-        private double _rest;          // 0 awake .. 1 resting (animated)
+        private double _rest;          // 0 awake .. 1 resting (already eased; drawn as is)
         private double _restTarget;
+        // One continuous, time-based transition: from _animFrom at _animStart to _restTarget over _animMs.
+        // A wake during a rest (or the other way) starts from wherever the ring is now, so it never jumps.
+        private double _animFrom;
+        private DateTime _animStart = DateTime.UtcNow;
+        private double _animMs = WakeAnimMs;
         private DateTime _lastTick = DateTime.UtcNow;
+        /// <summary>Self-test: ring diameters (px) of every frame drawn during a transition.</summary>
+        public System.Collections.Generic.List<float> FrameLog;
         private bool _wakeTap;
         private DateTime _swallowUntil;
         public Func<bool> RestAllowed;
@@ -68,6 +75,7 @@ namespace Rapcha.Win
         public RingWindow() : base(false)
         {
             _anim.Tick += (s, e) => { StepRest(); Render(); };
+            _anim.Interval = 15;
             _restTimer.Tick += (s, e) => OnRestTimer();
             _topmost.Tick += (s, e) => KeepOnTop();
             _clickWait.Tick += (s, e) => { _clickWait.Stop(); Clicked?.Invoke(); };
@@ -129,32 +137,46 @@ namespace Rapcha.Win
             if (!idle) return; // check again next interval
             _restTimer.Stop();
             if (_restTarget >= 1) return;
-            _restTarget = 1;
-            _lastTick = DateTime.UtcNow;
+            BeginTransition(1);
             AppStorage.Log("Ring resting");
-            UpdateAnim();
         }
 
         /// <summary>Back to full size (a tap, a drag, or voice typing / select to speak starting).</summary>
         public void Wake()
         {
-            if (_restTarget > 0)
-            {
-                _restTarget = 0;
-                _lastTick = DateTime.UtcNow;
-                UpdateAnim();
-            }
+            if (_restTarget > 0) BeginTransition(0);   // already waking or awake: no restart, just the timer below
             Poke();
+        }
+
+        private void BeginTransition(double target)
+        {
+            _animFrom = _rest;
+            _restTarget = target;
+            _animStart = DateTime.UtcNow;
+            double full = target < 0.5 ? WakeAnimMs : RestAnimMs;
+            _animMs = Math.Max(90, full * Math.Abs(target - _rest));
+            UpdateAnim();
+            StepRest();
+            Render();
+        }
+
+        /// <summary>Wake: ease-out cubic (quick start, soft landing). Rest: ease-in-out cubic.</summary>
+        public static double Ease(double t, bool waking)
+        {
+            t = Math.Max(0, Math.Min(1, t));
+            if (waking) return 1 - Math.Pow(1 - t, 3);
+            return t < 0.5 ? 4 * t * t * t : 1 - Math.Pow(-2 * t + 2, 3) / 2;
         }
 
         private void StepRest()
         {
-            var now = DateTime.UtcNow;
-            double step = (now - _lastTick).TotalMilliseconds / RestAnimMs;
-            _lastTick = now;
-            if (_rest < _restTarget) _rest = Math.Min(_restTarget, _rest + step);
-            else if (_rest > _restTarget) _rest = Math.Max(_restTarget, _rest - step);
-            if (Math.Abs(_rest - _restTarget) <= 0.001 && _state == RingState.Idle && !_selectMode) _anim.Enabled = false;
+            double t = (DateTime.UtcNow - _animStart).TotalMilliseconds / _animMs;
+            _rest = t >= 1 ? _restTarget : _animFrom + (_restTarget - _animFrom) * Ease(t, _restTarget < _animFrom);
+            if (Math.Abs(_rest - _restTarget) <= 0.0005)
+            {
+                _rest = _restTarget;
+                if (_state == RingState.Idle && !_selectMode) _anim.Enabled = false;
+            }
         }
 
         /// <summary>The ring as drawn right now (smaller while resting, hugging its edge), in screen pixels.</summary>
@@ -170,9 +192,15 @@ namespace Rapcha.Win
         /// <summary>The ring's rectangle relative to the ring origin, scaled for resting and anchored to the dock edge.</summary>
         private Rectangle DrawRect(int ring, int offset)
         {
-            double ease = _rest * _rest * (3 - 2 * _rest);
-            int d = (int)Math.Round(ring * (1 - (1 - RestScale) * ease));
-            int x = (ring - d) / 2, y = (ring - d) / 2;
+            var f = DrawRectF(ring, offset);
+            return Rectangle.Round(f);
+        }
+
+        /// <summary>Sub-pixel version used for drawing, so the ring grows smoothly and stays anchored to its edge.</summary>
+        private RectangleF DrawRectF(int ring, int offset)
+        {
+            float d = (float)(ring * (1 - (1 - RestScale) * _rest));
+            float x = (ring - d) / 2f, y = (ring - d) / 2f;
             switch (_dock.Edge)
             {
                 case DockEdge.Left: x = 0; break;
@@ -180,7 +208,7 @@ namespace Rapcha.Win
                 case DockEdge.Top: y = 0; break;
                 case DockEdge.Bottom: y = ring - d; break;
             }
-            return new Rectangle(offset + x, offset + y, d, d);
+            return new RectangleF(offset + x, offset + y, d, d);
         }
 
         private Screen CurrentScreen()
@@ -269,11 +297,12 @@ namespace Rapcha.Win
                         g.DrawArc(arc, inset, inset, size - inset * 2, size - inset * 2, (float)((t * 120) % 360), 70f);
                 }
 
-                var rr = DrawRect(ring, glow);
+                var rr = DrawRectF(ring, glow);
+                FrameLog?.Add(rr.Width);
                 // The hole in the middle stays see-through but must still take clicks: a layered window ignores
                 // the mouse only where alpha is 0, so the whole disc gets an (invisible) alpha of 2.
                 using (var hit = new SolidBrush(Color.FromArgb(2, 0, 0, 0))) g.FillEllipse(hit, rr);
-                double ease = _rest * _rest * (3 - 2 * _rest);
+                double ease = _rest;
                 float opacity = (float)(1 - (1 - RestOpacity) * ease), dark = (float)(1 - 0.35 * ease);
                 var state = g.Save();
                 if (_state == RingState.Polishing)
@@ -286,13 +315,14 @@ namespace Rapcha.Win
                 }
                 if (Lifebuoy != null)
                 {
-                    if (ease > 0.001)
+                    if (ease > 0)
                     {
                         var cm = new System.Drawing.Imaging.ColorMatrix { Matrix00 = dark, Matrix11 = dark, Matrix22 = dark, Matrix33 = opacity, Matrix44 = 1 };
                         using (var ia = new System.Drawing.Imaging.ImageAttributes())
                         {
                             ia.SetColorMatrix(cm);
-                            g.DrawImage(Lifebuoy, rr, 0, 0, Lifebuoy.Width, Lifebuoy.Height, GraphicsUnit.Pixel, ia);
+                            var dest = new[] { new PointF(rr.X, rr.Y), new PointF(rr.Right, rr.Y), new PointF(rr.X, rr.Bottom) };
+                            g.DrawImage(Lifebuoy, dest, new RectangleF(0, 0, Lifebuoy.Width, Lifebuoy.Height), GraphicsUnit.Pixel, ia);
                         }
                     }
                     else g.DrawImage(Lifebuoy, rr);
@@ -355,10 +385,20 @@ namespace Rapcha.Win
             if (_wakeTap || DateTime.UtcNow < _swallowUntil)
             {
                 // Woken by this tap (or a quick second tap of the same double-tap): nothing else happens.
-                _wakeTap = false;
                 _clickWait.Stop();
-                _swallowUntil = DateTime.UtcNow.AddMilliseconds(Math.Max(200, Math.Min(500, Native.GetDoubleClickTime())));
-                AppStorage.Log("Ring woke up");
+                if (_wakeTap) { _swallowUntil = DateTime.UtcNow.AddMilliseconds(Math.Max(200, Math.Min(500, Native.GetDoubleClickTime()))); AppStorage.Log("Ring woke up"); }
+                else AppStorage.Log("Ring tap swallowed (second tap of a double-click)");
+                _wakeTap = false;
+                return;
+            }
+            LastTapAt = DateTime.UtcNow;
+            if (_selectMode && _state == RingState.Idle)
+            {
+                // Reading aloud: one tap stops it straight away. The rest of a double-click (and any tap in the
+                // next moments) is swallowed, so it can never fall through into voice typing.
+                _clickWait.Stop();
+                _swallowUntil = DateTime.UtcNow.AddMilliseconds(Math.Max(400, Math.Min(600, Native.GetDoubleClickTime() + 100)));
+                Clicked?.Invoke();
                 return;
             }
             if (_state != RingState.Idle)
@@ -379,6 +419,8 @@ namespace Rapcha.Win
         }
 
         public bool IsDragging => _dragging;
+        /// <summary>When the last tap (a click that was not a drag) happened.</summary>
+        public DateTime LastTapAt { get; private set; } = DateTime.MinValue;
 
         private void BeginDrag(Point screen)
         {

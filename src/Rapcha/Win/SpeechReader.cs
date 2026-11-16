@@ -16,6 +16,7 @@ namespace Rapcha.Win
         private Prompt _prompt;
         private int _baseChar;
         private readonly bool _silentOutput;
+        private readonly string _voiceName;
 
         public ReadingPlan Plan { get; private set; }
         public int CurrentWord { get; private set; }
@@ -26,7 +27,8 @@ namespace Rapcha.Win
         public event Action Changed;
 
         /// <param name="silentOutput">Self-test only: speak into memory instead of the speakers.</param>
-        public SpeechReader(bool silentOutput = false) { _silentOutput = silentOutput; }
+        /// <param name="voiceName">An installed SAPI voice; null or missing = the Windows default.</param>
+        public SpeechReader(bool silentOutput = false, string voiceName = null) { _silentOutput = silentOutput; _voiceName = voiceName; }
 
         public static int CountVoices()
         {
@@ -39,6 +41,11 @@ namespace Rapcha.Win
             _synth = new SpeechSynthesizer();
             if (_silentOutput) _synth.SetOutputToWaveStream(new MemoryStream());
             else _synth.SetOutputToDefaultAudioDevice();
+            if (!string.IsNullOrEmpty(_voiceName))
+            {
+                try { _synth.SelectVoice(_voiceName); }
+                catch { AppStorage.Log("Voices: the chosen desktop voice is not installed any more; using the default"); }
+            }
             VoiceName = _synth.Voice?.Name ?? "";
             _synth.Rate = VoiceSettings.SapiRate;
             _synth.SpeakProgress += OnProgress;

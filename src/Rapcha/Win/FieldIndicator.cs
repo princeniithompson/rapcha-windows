@@ -68,8 +68,15 @@ namespace Rapcha.Win
             });
         }
 
+        /// <summary>Focus moved somewhere (any UIA focus event, UI thread).</summary>
+        public event Action FocusMoved;
+
+        /// <summary>One lookup of the focused element, without changing the outline. Null if UIA is busy or slow.</summary>
+        public Task<FieldInfo> ProbeAsync() => LookupAsync();
+
         private async Task OnFocusEventAsync()
         {
+            FocusMoved?.Invoke();
             if (Tracking) { await CheckNowAsync(); return; }
             if (WantFocusChecks == null || !WantFocusChecks()) return;
             var info = await LookupAsync();

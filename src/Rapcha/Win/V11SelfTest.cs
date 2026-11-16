@@ -60,7 +60,7 @@ namespace Rapcha.Win
             ExitThread();
         }
 
-        private static async Task<IntPtr> WaitWindow(Func<IntPtr> find, int ms)
+        internal static async Task<IntPtr> WaitWindow(Func<IntPtr> find, int ms)
         {
             var at = DateTime.UtcNow;
             while ((DateTime.UtcNow - at).TotalMilliseconds < ms)
@@ -73,7 +73,7 @@ namespace Rapcha.Win
         }
 
         /// <summary>Brings a window to the front and clicks a point in it (so the right control has keyboard focus).</summary>
-        private static async Task Focus(IntPtr top, IntPtr child = default(IntPtr))
+        internal static async Task Focus(IntPtr top, IntPtr child = default(IntPtr))
         {
             TextDelivery.BringToFront(top, new System.Text.StringBuilder());
             await Task.Delay(150);
@@ -226,7 +226,7 @@ namespace Rapcha.Win
         }
 
         /// <summary>BitBlt with CAPTUREBLT so layered windows (outline, edge glow) are in the picture.</summary>
-        private static Bitmap Capture(Rectangle r)
+        internal static Bitmap Capture(Rectangle r)
         {
             var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
@@ -362,7 +362,7 @@ namespace Rapcha.Win
 
         // ---- Keyboard shortcuts ----
 
-        private static void Key(int vk, bool down)
+        internal static void Key(int vk, bool down)
         {
             var i = new Native.INPUT
             {

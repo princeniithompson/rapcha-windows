@@ -45,6 +45,7 @@ namespace Rapcha.Win
         // Voice typing: the text field the words will go into.
         private readonly FieldIndicator _field = new FieldIndicator();
         private readonly ShortcutManager _shortcuts;
+        private readonly TypingWaker _typing;
 
         // Ring and Words bubble move together while the bubble is up.
         private Point _bubbleOffset;
@@ -84,6 +85,8 @@ namespace Rapcha.Win
                 _bubble.FieldValid = _field.HasField;
                 AppStorage.Log("[s" + _sessionNumber + "] field: " + DescribeField(info) + " moves=" + _field.Moves);
             };
+            // Typing into a text field wakes the ring and keeps it awake (only key times are seen, never keys).
+            _typing = new TypingWaker(_ring, _field) { Allowed = () => _phase == Phase.Idle && _overlay == null && !_selfTestRing };
             _shortcuts = new ShortcutManager();
             _shortcuts.Triggered += OnShortcut;
             ApplyShortcuts();
@@ -191,6 +194,14 @@ namespace Rapcha.Win
         {
             _ringClicks++;
             if (_selfTestRing) return; // the ring self-test only counts taps
+            // Select to speak is open (previewing or reading), or just closed: a tap only stops reading.
+            if (_phase == Phase.Idle && (_overlay != null || _ring.LastTapAt < _overlayClosedAt.AddMilliseconds(OverlayGraceMs)))
+            {
+                bool open = _overlay != null;
+                CloseOverlay();
+                AppStorage.Log("Ring tap during select to speak: " + (open ? "stopped reading" : "ignored (reading just ended)") + "; voice typing not started");
+                return;
+            }
             switch (_phase)
             {
                 case Phase.Idle: StartRecording(); break;
@@ -206,6 +217,7 @@ namespace Rapcha.Win
 
         private void StartRecording()
         {
+            RecordingStarts++;
             var key = AppStorage.LoadApiKey();
             if (LiveSession.IsPlaceholder(key))
             {
@@ -472,6 +484,9 @@ namespace Rapcha.Win
         // ---------------- Select to speak (screen overlay) ----------------
 
         private ScreenOverlay _overlay;
+        private const int OverlayGraceMs = 400;
+        private DateTime _overlayClosedAt = DateTime.MinValue.AddDays(1);
+        internal int RecordingStarts { get; private set; }
         private IntPtr _overlayPrevious;
         private int _overlayGeneration;
 
@@ -557,6 +572,7 @@ namespace Rapcha.Win
         {
             if (_overlay != overlay) return;
             _overlay = null;
+            _overlayClosedAt = DateTime.UtcNow;
             _overlayGeneration++;
             _glow.Hide();
             _ring.SelectMode = false;
@@ -577,7 +593,7 @@ namespace Rapcha.Win
         /// words were found, then selects the first line with a drag, with two corner clicks, and with a tap on a
         /// word, each read with the Windows voice into a silent stream. Finally presses Esc and checks the
         /// overlay and glow are gone. Exit: 0 ok, 2 no voice, 3 OCR/words missing, 4 selection/reading wrong,
-        /// 5 close failed, 6 OCR unavailable, 7 two-column page read out of order, 1 other/timeout.
+        /// 5 close failed, 6 OCR unavailable, 7 two-column page read out of order, 8 a ring tap while reading started voice typing, 1 other/timeout.
         /// </summary>
         private void RunOcrSelfTest()
         {
@@ -585,7 +601,9 @@ namespace Rapcha.Win
             int voices = SpeechReader.CountVoices();
             AppStorage.Log("Selftest ocr: sapi_voices=" + voices);
             if (voices == 0) { SelfTestExit(2); return; }
-            int stage = 0, closeWait = 0;
+            int stage = 0, closeWait = 0, startsBefore = 0;
+            Rectangle area0 = Rectangle.Empty;
+            Box columnsBox = new Box();
             DateTime stageAt = DateTime.UtcNow;
             TextLine line = null;
             ColumnsTestForm columns = null;
@@ -704,6 +722,7 @@ namespace Rapcha.Win
                         if (r == null) return;
                         var area = columns.RectangleToScreen(columns.ClientRectangle);
                         var origin = _overlay.Bounds.Location;
+                        area0 = new Rectangle(area.X - origin.X + 4, area.Y - origin.Y + 4, area.Width - 8, area.Height - 8);
                         AppStorage.Log("Selftest ocr: columns page lines=" + r.Page.Lines.Count + " blocks=" + r.Page.Blocks.Count);
                         _overlay.SimulateDrag(new Box(area.X - origin.X + 4, area.Y - origin.Y + 4, area.Width - 8, area.Height - 8));
                         stage = 9;
@@ -723,7 +742,56 @@ namespace Rapcha.Win
                             AppStorage.Log("Selftest ocr: columns token order=" + string.Join(",", order));
                             Fail(7, "column order"); return;
                         }
-                        Native.PostMessage(_overlay.Handle, Native.WM_KEYDOWN, (IntPtr)(int)Keys.Escape, IntPtr.Zero);
+                        // Part 3: a ring tap while reading stops reading and never starts voice typing.
+                        columnsBox = new Box(area0.X, area0.Y, area0.Width, area0.Height);
+                        _overlay.SimulateDrag(columnsBox);
+                        stageAt = DateTime.UtcNow;
+                        stage = 11;
+                        break;
+                    }
+                    case 11:
+                        if (!_overlay.Previewing && (_overlay.Reader == null || _overlay.Reader.Status != ReadState.Playing))
+                        {
+                            if ((DateTime.UtcNow - stageAt).TotalMilliseconds > 8000) { Fail(8, "reading did not start again"); return; }
+                            return;
+                        }
+                        startsBefore = RecordingStarts;
+                        SendClick(Center(_ring.VisibleRingBounds));
+                        AppStorage.Log("Selftest ocr: ring clicked while " + (_overlay.Previewing ? "previewing" : "reading"));
+                        stageAt = DateTime.UtcNow;
+                        stage = 12;
+                        break;
+                    case 12:
+                    {
+                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 1500) return;
+                        bool ok = _overlay == null && _phase == Phase.Idle && RecordingStarts == startsBefore;
+                        AppStorage.Log("Selftest ocr: single tap while reading: overlay_closed=" + (_overlay == null) + " phase=" + _phase + " voice_typing_started=" + (RecordingStarts != startsBefore));
+                        if (!ok) { Fail(8, "a ring tap while reading started voice typing or did not stop reading"); return; }
+                        _ring.SimulateDoubleClick();
+                        if (_overlay == null) { Fail(1, "overlay did not open (part 3)"); return; }
+                        stageAt = DateTime.UtcNow;
+                        stage = 13;
+                        break;
+                    }
+                    case 13:
+                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 1000) return;
+                        SendClick(Center(_ring.VisibleRingBounds));   // a real double-click on the ring while select to speak is open
+                        stageAt = DateTime.UtcNow;
+                        stage = 14;
+                        break;
+                    case 14:
+                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 140) return;
+                        SendClick(Center(_ring.VisibleRingBounds));
+                        stageAt = DateTime.UtcNow;
+                        stage = 15;
+                        break;
+                    case 15:
+                    {
+                        if ((DateTime.UtcNow - stageAt).TotalMilliseconds < 1500) return;
+                        bool ok = _overlay == null && _phase == Phase.Idle && RecordingStarts == startsBefore;
+                        AppStorage.Log("Selftest ocr: double tap while open: overlay_closed=" + (_overlay == null) + " reopened=" + (_overlay != null) + " phase=" + _phase +
+                                       " voice_typing_started=" + (RecordingStarts != startsBefore));
+                        if (!ok) { Fail(8, "a double tap while select to speak was open leaked into voice typing or reopened it"); return; }
                         stage = 10;
                         break;
                     }
@@ -944,6 +1012,8 @@ namespace Rapcha.Win
             go.Start();
         }
 
+        private static Point Center(Rectangle r) => new Point(r.X + r.Width / 2, r.Y + r.Height / 2);
+
         internal static void SendClick(Point p)
         {
             var vs = SystemInformation.VirtualScreen;
@@ -984,6 +1054,7 @@ namespace Rapcha.Win
             _glow.Dispose();
             _field.Dispose();
             _shortcuts.Dispose();
+            _typing.Dispose();
             Cancel(null);
             _tray.Visible = false;
             _tray.Dispose();

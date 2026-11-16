@@ -26,6 +26,17 @@ namespace Rapcha.Win
         private readonly Label _voiceStatus = new Label();
         private readonly TrackBar _speed = new TrackBar();
         private readonly Label _speedLabel = new Label();
+        private readonly ComboBox _voice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430, Font = new Font(Theme.Sans, 10f) };
+        private readonly PillButton _previewVoice = new PillButton { Text = "Preview" };
+        private readonly Label _voiceHint = new Label();
+        private FlowLayoutPanel _voiceRow;
+        private IReadAloud _preview;
+        private bool _loadingVoices;
+        /// <summary>Self-test: Preview speaks into memory instead of the speakers.</summary>
+        internal static bool SilentPreview;
+        internal ComboBox VoicePicker => _voice;
+        internal PillButton PreviewButton => _previewVoice;
+        internal IReadAloud LastPreview => _preview;
         private readonly GlowPicker _glow = new GlowPicker();
         private readonly ShortcutsRows _shortcuts = new ShortcutsRows();
         internal ShortcutsRows Shortcuts => _shortcuts;
@@ -112,6 +123,7 @@ namespace Rapcha.Win
             speedRow.Controls.Add(_speed, 0, 0);
             speedRow.Controls.Add(_speedLabel, 1, 0);
             _voiceStatus.Text = VoiceText();
+            SetupVoicePicker();
 
             _save.Text = "Save";
             _save.Click += async (s, e) => await SaveAsync();
@@ -138,7 +150,7 @@ namespace Rapcha.Win
                 _shortcuts));
             _layout.Controls.Add(Card("Select to speak",
                 Help("Double-click the ring, then drag a box around any text on the screen (or tap a word) to hear it. Esc closes."),
-                _voiceStatus, speedRow));
+                _voiceRow, _voiceHint, speedRow));
             _layout.Controls.Add(Card("Help",
                 Help("The log has no key and none of your words."), Row(_copyLog)));
             _layout.RowCount = _layout.Controls.Count;
@@ -176,8 +188,62 @@ namespace Rapcha.Win
             {
                 StopMeter();
                 _meterCheck.Dispose();
+                try { _preview?.Dispose(); } catch { }
             }
             base.Dispose(disposing);
+        }
+
+        private void SetupVoicePicker()
+        {
+            _voiceRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Color.White, Margin = new Padding(0, 4, 0, 2), WrapContents = false };
+            _voice.Margin = new Padding(0, 4, 10, 0);
+            _previewVoice.Margin = new Padding(0, 0, 0, 0);
+            _voiceRow.Controls.Add(new Label { Text = "Voice", AutoSize = true, Font = new Font(Theme.Sans, 10f, FontStyle.Bold), ForeColor = Theme.Ink, BackColor = Color.White, Margin = new Padding(0, 8, 10, 0) });
+            _voiceRow.Controls.Add(_voice);
+            _voiceRow.Controls.Add(_previewVoice);
+            _voiceHint.Text = "More voices: Windows Settings > Time & Language > Speech > Add voices.";
+            _voiceHint.AutoSize = true;
+            _voiceHint.ForeColor = Theme.Muted;
+            _voiceHint.BackColor = Color.White;
+            _voiceHint.Margin = new Padding(0, 2, 0, 6);
+            LoadVoices();
+            _voice.SelectedIndexChanged += (s, e) =>
+            {
+                if (_loadingVoices || !(_voice.SelectedItem is VoiceEntry v)) return;
+                Voices.SavedId = v.Id;
+                AppStorage.Log("Voices: chosen " + v.Label + (v.Desktop ? " [SAPI]" : " [OneCore]"));
+            };
+            _previewVoice.Click += (s, e) => PreviewVoice();
+        }
+
+        /// <summary>Fills the list (all OneCore + SAPI voices) and selects the saved one, or the Windows default.</summary>
+        internal void LoadVoices()
+        {
+            _loadingVoices = true;
+            try
+            {
+                var all = Voices.All();
+                _voice.Items.Clear();
+                foreach (var v in all) _voice.Items.Add(v);
+                var want = Voices.SavedId;
+                int i = all.FindIndex(v => v.Id == want);
+                if (i < 0) { var def = Voices.DefaultSapiId(); i = all.FindIndex(v => v.Id == def); }
+                if (i < 0 && all.Count > 0) i = 0;
+                if (i >= 0) _voice.SelectedIndex = i;
+                _voice.Enabled = _previewVoice.Enabled = all.Count > 0;
+                if (all.Count == 0) _voiceHint.Text = "No Windows voice is installed. Add one in Windows Settings > Time & Language > Speech > Add voices.";
+                AppStorage.Log("Voices: listed " + all.Count + " (onecore=" + all.FindAll(v => !v.Desktop).Count + ", sapi=" + all.FindAll(v => v.Desktop).Count + ")");
+            }
+            finally { _loadingVoices = false; }
+        }
+
+        private void PreviewVoice()
+        {
+            if (!(_voice.SelectedItem is VoiceEntry v)) return;
+            try { _preview?.Dispose(); } catch { }
+            _preview = Voices.CreateReader(SilentPreview, v.Id);
+            _preview.Read("Hello, I'm " + VoiceLabels.ShortName(v.FullName) + ". This is how I sound when Rapcha reads to you.");
+            AppStorage.Log("Voices: preview " + v.Label + " reader=" + _preview.GetType().Name);
         }
 
         private void ShowSpeed() => _speedLabel.Text = "Speed " + (_speed.Value / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "×";

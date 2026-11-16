@@ -269,3 +269,54 @@ namespace Rapcha.Tests
         }
     }
 }
+
+namespace Rapcha.Tests
+{
+    using System.Linq;
+    using Rapcha.Core;
+    using Xunit;
+
+    public class VoiceLabelTests
+    {
+        [Theory]
+        [InlineData("Microsoft Zira Desktop", "Zira")]
+        [InlineData("Microsoft Hazel Desktop - English (Great Britain)", "Hazel")]
+        [InlineData("Microsoft George", "George")]
+        [InlineData("Microsoft David", "David")]
+        [InlineData("Custom Voice", "Custom Voice")]
+        public void ShortNames(string full, string expected) => Assert.Equal(expected, VoiceLabels.ShortName(full));
+
+        [Fact]
+        public void Labels()
+        {
+            Assert.Equal("Zira, female, English (US)", VoiceLabels.Label("Microsoft Zira", "Female", "en-US", false));
+            Assert.Equal("David (desktop), male, English (US)", VoiceLabels.Label("Microsoft David Desktop", "Male", "en-US", true));
+            Assert.Equal("Hazel, female, English (UK)", VoiceLabels.Label("Microsoft Hazel", "Female", "en-GB", false));
+            Assert.Equal("Heera, female, English (India)", VoiceLabels.Label("Microsoft Heera", "Female", "en-IN", false));
+            Assert.Equal("Mark, male", VoiceLabels.Label("Microsoft Mark", "Male", "", false));
+        }
+
+        [Fact]
+        public void PreferredLanguageSortsFirst()
+        {
+            var keys = new[]
+            {
+                VoiceLabels.SortKey("en-GB", false, "Microsoft George", "en-US"),
+                VoiceLabels.SortKey("en-US", true, "Microsoft David Desktop", "en-US"),
+                VoiceLabels.SortKey("en-US", false, "Microsoft Zira", "en-US"),
+                VoiceLabels.SortKey("fr-FR", false, "Microsoft Julie", "en-US"),
+            };
+            var order = keys.Select((k, i) => (k, i)).OrderBy(x => x.k, System.StringComparer.Ordinal).Select(x => x.i).ToArray();
+            Assert.Equal(new[] { 2, 1, 0, 3 }, order);
+        }
+
+        [Fact]
+        public void EstimatedTimingIsIncreasingAndInsideTheAudio()
+        {
+            var s = VoiceLabels.EstimateStarts(new[] { 3, 5, 2, 8, 4 }, 2000);
+            Assert.Equal(5, s.Length);
+            for (int i = 1; i < s.Length; i++) Assert.True(s[i] > s[i - 1]);
+            Assert.True(s[0] >= 0 && s[s.Length - 1] < 2000);
+        }
+    }
+}

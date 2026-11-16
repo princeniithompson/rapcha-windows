@@ -33,7 +33,7 @@ namespace Rapcha.Win
 
         private OcrService.Result _ocr;
         private string _status = "Reading the screen…";
-        private SpeechReader _reader;
+        private IReadAloud _reader;
         private SpokenText _spoken;
         private Box _hl, _hlFrom, _hlTarget;
         private DateTime _hlMoved;
@@ -55,7 +55,7 @@ namespace Rapcha.Win
 
         public string LastReadText { get; private set; } = "";
         public int HighlightMoves { get; private set; }
-        public SpeechReader Reader => _reader;
+        public IReadAloud Reader => _reader;
         public OcrService.Result Ocr => _ocr;
 
         public event Action<Control> ControlUsed;
@@ -119,11 +119,11 @@ namespace Rapcha.Win
 
         // ---------------- Reading ----------------
 
-        private SpeechReader Voice()
+        private IReadAloud Voice()
         {
             if (_reader == null)
             {
-                _reader = new SpeechReader(_silentVoice);
+                _reader = Voices.CreateReader(_silentVoice);   // the voice chosen in Settings
                 _reader.Changed += OnReaderChanged;
             }
             return _reader;
