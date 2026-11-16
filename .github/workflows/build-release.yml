@@ -52,7 +52,7 @@ jobs:
           $null = $p.Handle
           if (-not $p.WaitForExit(150000)) { Stop-Process -Id $p.Id -Force; throw "Overlay self-test hung" }
           $code = $p.ExitCode
-          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ocr|Overlay|OCR|Piper|piper|Voice failed|Unhandled" | Select-Object -Last 25 }
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest ocr|Overlay|OCR|Piper|piper|Voice|capture|Unhandled|Exception| at " | Select-Object -Last 40 }
           Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
           "Overlay self-test exit code: $code (0 ok, 2 no voice, 3 words not recognised, 4 selection/reading wrong, 5 close/cleanup failed, 6 no OCR language)"
           "## Select-to-speak overlay self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
