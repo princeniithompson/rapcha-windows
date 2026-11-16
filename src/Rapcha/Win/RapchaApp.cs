@@ -746,9 +746,15 @@ namespace Rapcha.Win
                         }
                         // Part 3: a ring tap while reading stops reading and never starts voice typing.
                         columnsBox = new Box(area0.X, area0.Y, area0.Width, area0.Height);
+                        // v14 reads at once and the self-test voice speaks into memory far faster than real time, so the
+                        // ring is clicked in the same tick the reading starts (the click lands while it is still playing).
                         _overlay.SimulateDrag(columnsBox);
+                        if (_overlay.Reader == null || _overlay.Reader.Status != ReadState.Playing) { Fail(8, "reading did not start again"); return; }
+                        startsBefore = RecordingStarts;
+                        SendClick(Center(_ring.VisibleRingBounds));
+                        AppStorage.Log("Selftest ocr: ring clicked while reading");
                         stageAt = DateTime.UtcNow;
-                        stage = 11;
+                        stage = 12;
                         break;
                     }
                     case 11:
