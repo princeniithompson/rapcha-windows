@@ -203,6 +203,7 @@ namespace Rapcha.Win
             _voiceRow.Controls.Add(_previewVoice);
             _voiceHint.Text = "More voices: Windows Settings > Time & Language > Speech > Add voices.";
             _voiceHint.AutoSize = true;
+            _voiceHint.UseMnemonic = false;   // show the "&" in "Time & Language"
             _voiceHint.ForeColor = Theme.Muted;
             _voiceHint.BackColor = Color.White;
             _voiceHint.Margin = new Padding(0, 2, 0, 6);
