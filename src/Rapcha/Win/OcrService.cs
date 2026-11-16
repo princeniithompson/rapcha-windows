@@ -172,8 +172,15 @@ namespace Rapcha.Win
             {
                 // Each text row on its own, enlarged and sliced (what v13 did for every selection): the engine reads
                 // a lone row far better than the same row inside the whole screen (green code on dark, small grey).
-                jobs.Add(("lines-norm-" + X(s2), () => LineStrips(src, page(), s2, Variant.Norm, "lines-norm-" + X(s2), 4, tile, between, token)));
-                jobs.Add(("lines-colour-" + X(s2), () => LineStrips(src, page(), s2, Variant.Colour, "lines-colour-" + X(s2), 3, tile, between, token)));
+                // The same set v13 ran for a selection (whole rows and sliced rows, norm, colour, threshold, 3x), so
+                // the rows' readings outvote the whole-screen passes the way the selection's passes did.
+                double s3 = dpi >= 120 ? 2.0 : 3.0;
+                jobs.Add(("lines-norm-" + X(s2), () => LineStrips(src, page(), s2, Variant.Norm, "lines-norm-" + X(s2), 4, 0, between, token)));
+                jobs.Add(("lines-colour-" + X(s2), () => LineStrips(src, page(), s2, Variant.Colour, "lines-colour-" + X(s2), 3, 0, between, token)));
+                jobs.Add(("lines-norm-tiles-" + X(s2), () => LineStrips(src, page(), s2, Variant.Norm, "lines-norm-tiles-" + X(s2), 4, tile, between, token)));
+                jobs.Add(("lines-colour-tiles-" + X(s2), () => LineStrips(src, page(), s2, Variant.Colour, "lines-colour-tiles-" + X(s2), 3, tile, between, token)));
+                jobs.Add(("lines-norm-" + X(s3), () => LineStrips(src, page(), s3, Variant.Norm, "lines-norm-" + X(s3), 5, 0, between, token)));
+                jobs.Add(("lines-bin-" + X(s2), () => LineStrips(src, page(), s2, Variant.Bin, "lines-bin-" + X(s2), 2, 0, between, token)));
             }
             jobs.Add(("full-colour-tiles-" + X(s2), () => Grid(s2, Variant.Colour, false, "full-colour-tiles-" + X(s2), 3, tile)));
             jobs.Add(("full-norm-tiles-" + X(s2), () => Grid(s2, Variant.Norm, false, "full-norm-tiles-" + X(s2), 3, tile)));
@@ -260,7 +267,7 @@ namespace Rapcha.Win
                 var rect = Rectangle.Intersect(new Rectangle((int)Math.Floor(r.X - mx), (int)Math.Floor(r.Y - my), (int)Math.Ceiling(r.W + 2 * mx), (int)Math.Ceiling(r.H + 2 * my)),
                                                new Rectangle(0, 0, src.W, src.H));
                 if (rect.Width < 8 || rect.Height < 6) continue;
-                int tw = rect.Width > tile * 0.7 ? Math.Min(tile, Math.Max(160, rect.Width / 2 + 60)) : rect.Width;
+                int tw = tile > 0 && rect.Width > tile * 0.7 ? Math.Min(tile, Math.Max(160, rect.Width / 2 + 60)) : rect.Width;
                 var p = GridPass(src, rect, scale, v, false, name, priority, tw, rect.Height, between, token);
                 foreach (var line in p.Lines)
                 {
@@ -269,6 +276,7 @@ namespace Rapcha.Win
                 }
             }
             pass.Ms = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            AppStorage.Log("OCR rows: " + name + " rows=" + rows.Count + " words=" + pass.WordCount + " ms=" + pass.Ms);
             return pass;
         }
 
