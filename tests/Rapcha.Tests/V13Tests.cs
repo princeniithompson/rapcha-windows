@@ -127,6 +127,26 @@ namespace Rapcha.Tests
             Assert.Equal("can", merged.Lines.Single().Words.Single().Text);
         }
 
+        [Fact]
+        public void JoinedReadingLosesWhenMorePassesSawTheWordsApart()
+        {
+            OcrPass Joined(string n) { var p = new OcrPass { Name = n }; p.Lines.Add(new List<OcrWord> { new OcrWord("supportpageor", new Box(147, 556, 92, 12)) }); return p; }
+            OcrPass Apart(string n) { var p = new OcrPass { Name = n }; p.Lines.Add(Words("support page or", 147, 556, 12, 6.2, 4)); return p; }
+            var merged = OcrMerge.Merge(new[] { Joined("a"), Apart("b"), Apart("c"), Apart("d") });
+            Assert.Equal("support page or", string.Join(" ", merged.Lines.Single().Words.Select(w => w.Text)));
+        }
+
+        [Fact]
+        public void ADashStaysInItsLine()
+        {
+            var p = new OcrPass();
+            p.Lines.Add(Words("CRITICAL CRASH REPORT", 40, 44, 10, 10, 6));
+            p.Lines.Add(new List<OcrWord> { new OcrWord("-", new Box(183, 48, 5, 2)) });
+            p.Lines.Add(Words("DIAGNOSE AND FIX", 192, 44, 10, 10, 6));
+            var merged = OcrMerge.Merge(new[] { p });
+            Assert.Single(merged.Lines);
+        }
+
         [Theory]
         [InlineData(":app:testDebugUnitTest", "app test Debug Unit Test")]
         [InlineData(":app:packageDebug", "app package Debug")]

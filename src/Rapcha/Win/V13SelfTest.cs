@@ -547,7 +547,7 @@ namespace Rapcha.Win
             var st = w.Settings;
             var picker = st.VoicePicker;
             for (Control c = picker; c != null; c = c.Parent)
-                if (c is ScrollableControl sc && sc.AutoScroll) { sc.ScrollControlIntoView(st.EditVoiceButton.Parent ?? picker); break; }
+                if (c is ScrollableControl sc && sc.AutoScroll) { sc.ScrollControlIntoView(st.SpeedSlider); sc.ScrollControlIntoView(st.SpeedSlider.Parent ?? st.SpeedSlider); break; }
             await Task.Delay(300);
 
             // Locked by default.

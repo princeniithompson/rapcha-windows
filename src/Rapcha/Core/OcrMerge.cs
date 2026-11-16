@@ -84,6 +84,9 @@ namespace Rapcha.Core
             {
                 // Lone punctuation that no other pass saw is noise from thresholding.
                 if (c.Alnum == 0 && c.Votes == 0 && c.Priority > 0) continue;
+                // Two words read as one ("supportpageor"): if more passes saw separate words there than saw this
+                // joined reading, leave the spot to the separate words.
+                if (c.Alnum >= 6 && SplitBy(c, Near(c.Word.Box)) > c.Votes + 1) continue;
                 bool clash = false;
                 for (int r = (int)Math.Floor(c.Word.Box.Y / Cell); r <= (int)Math.Floor(c.Word.Box.Bottom / Cell) && !clash; r++)
                     if (acceptedGrid.TryGetValue(r, out var l))
@@ -104,6 +107,13 @@ namespace Rapcha.Core
             return layout;
         }
 
+        /// <summary>How many other passes have two or more words that lie mostly inside this candidate's box.</summary>
+        private static int SplitBy(Cand c, IEnumerable<Cand> near)
+        {
+            return near.Where(o => o.Pass != c.Pass && o.Alnum > 0 && o.Word.Box.W < 0.8 * c.Word.Box.W && OverlapOfSmaller(o.Word.Box, c.Word.Box) >= 0.8)
+                       .GroupBy(o => o.Pass).Count(g => g.Count() >= 2);
+        }
+
         /// <summary>Groups words into visual lines: same row when they share at least half of the smaller height.</summary>
         public static List<List<OcrWord>> Rows(List<OcrWord> words)
         {
@@ -116,7 +126,9 @@ namespace Rapcha.Core
                     var rb = rows[i].box;
                     double overlap = Math.Min(rb.Bottom, w.Box.Bottom) - Math.Max(rb.Y, w.Box.Y);
                     double minH = Math.Min(rb.H, w.Box.H);
-                    bool similar = Math.Max(rb.H, w.Box.H) <= 2.2 * minH;
+                    // Punctuation ("-", ".") is short: it joins the row it sits in whatever its height.
+                    bool punct = !w.Text.Any(char.IsLetterOrDigit) && w.Box.CenterY >= rb.Y && w.Box.CenterY <= rb.Bottom;
+                    bool similar = punct || Math.Max(rb.H, w.Box.H) <= 2.2 * minH;
                     if (similar && overlap >= 0.5 * minH && overlap > bestOverlap) { best = i; bestOverlap = overlap; }
                 }
                 if (best < 0) rows.Add((w.Box, new List<OcrWord> { w }));
