@@ -22,9 +22,12 @@
 3. If Windows says **"Windows protected your PC"**, click **More info** and then **Run anyway**.
 4. Paste your Gemini API key in the window that opens and click **Save**.
 
-Then click the red and white ring at the edge of your screen, speak, and click it again.
-Your words are typed where your cursor is, or copied so you can press **Ctrl+V**.
-Right-click the ring (or press **Esc**) while it is listening to cancel. Right-click it any other time for **Settings** and **Exit**.
+Then click the red and white ring at the edge of your screen and speak. Your words appear live in the Words bubble.
+Click **Complete** (or the ring again) and your words are typed where your cursor is, or copied so you can press **Ctrl+V**.
+
+If the bubble says **"I can't hear your microphone"**, click **Fix microphone** and turn on **Microphone access** and **Let desktop apps access your microphone**.
+In Settings you can choose your microphone and watch the level bar move when you talk.
+Click **Cancel**, right-click the ring, or press **Esc** while it is listening to cancel. Right-click it any other time for **Settings** and **Exit**.
 
 ## For developers
 

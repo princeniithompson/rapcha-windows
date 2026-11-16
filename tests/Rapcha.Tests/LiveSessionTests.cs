@@ -101,6 +101,8 @@ namespace Rapcha.Tests
             var session = new LiveSession("AIzaTestKey123", new List<string> { "Prince Nii" }) { Endpoint = server.Uri };
             LiveError failure = null;
             session.Failed += e => failure = e;
+            var previews = new List<string>();
+            session.Preview += p => { lock (previews) previews.Add(p); };
             // Audio captured before the socket is ready must be held and sent in order.
             for (int i = 0; i < 5; i++) session.SendAudio(Tone(5000));
             await session.ConnectAsync();
@@ -110,6 +112,10 @@ namespace Rapcha.Tests
 
             Assert.Null(failure);
             Assert.Equal("Hello world, Prince Nii.", text);
+            Assert.Equal("final_received", session.FinishReason);
+            Assert.Equal(15, session.ChunksSent);
+            Assert.True(session.SetupMs >= 0);
+            lock (previews) Assert.Contains("Hello wor", previews);
             Assert.Equal("AIzaTestKey123", server.ApiKeyHeader);
             List<string> got;
             lock (server.Received) got = server.Received.ToList();
@@ -138,7 +144,7 @@ namespace Rapcha.Tests
             await session.ConnectAsync();
             var done = await Task.WhenAny(failed.Task, Task.Delay(5000));
             Assert.Same(failed.Task, done);
-            Assert.Equal(LiveErrorKind.BadKey, failed.Task.Result.Kind);
+            Assert.Equal(LiveErrorKind.BadKey, (await failed.Task).Kind);
             session.Dispose();
         }
 
@@ -183,6 +189,7 @@ namespace Rapcha.Tests
             var text = await session.FinishAsync();
             session.Dispose();
             Assert.Equal("", text);
+            Assert.Equal("near_silent", session.FinishReason);
             lock (server.Received) Assert.DoesNotContain(server.Received, m => m.Contains("activityEnd"));
         }
     }

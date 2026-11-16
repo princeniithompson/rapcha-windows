@@ -12,7 +12,21 @@ namespace Rapcha.Core
     public sealed class LiveTurnState
     {
         private readonly StringBuilder _activeTurnText = new StringBuilder();
+        private readonly SilenceLevels _levels;
         private double _rmsMax;
+        private int _peak;
+
+        public LiveTurnState() : this(SilenceLevels.Android) { }
+        public LiveTurnState(SilenceLevels levels) { _levels = levels ?? SilenceLevels.Android; }
+
+        // Diagnostics only (counts, never words).
+        public int InterimFrames { get; private set; }
+        public int InputFrames { get; private set; }
+        public int ModelTextFrames { get; private set; }
+        public int OutputFrames { get; private set; }
+        public int TurnCompleteFrames { get; private set; }
+        public int Peak => _peak;
+        public string LastOutputText { get; private set; } = "";
         private double _rmsSum;
         private int _rmsCount;
 
@@ -25,7 +39,7 @@ namespace Rapcha.Core
         public double RmsMean => _rmsCount == 0 ? 0.0 : _rmsSum / _rmsCount;
         public double RmsMax => _rmsCount == 0 ? 0.0 : _rmsMax;
         public int RmsSamples => _rmsCount;
-        public bool IsNearSilent => TranscriptAcceptance.IsNearSilent(RmsMean, RmsMax, RmsSamples);
+        public bool IsNearSilent => TranscriptAcceptance.IsNearSilent(RmsMean, RmsMax, RmsSamples, _levels);
 
         /// <summary>Called for every raw (pre-gain) chunk that is sent, like planner.onAudio.</summary>
         public void OnAudioSent(byte[] rawPcm)
@@ -34,6 +48,8 @@ namespace Rapcha.Core
             _rmsCount++;
             _rmsSum += rms;
             if (rms > _rmsMax) _rmsMax = rms;
+            int p = SpeechGain.Peak(rawPcm, rawPcm.Length - (rawPcm.Length % 2));
+            if (p > _peak) _peak = p;
         }
 
         public void MarkActivityEnded() { ActivityEnded = true; }
@@ -44,6 +60,12 @@ namespace Rapcha.Core
         /// </summary>
         public string OnServerContent(ServerMessage m)
         {
+            if (!string.IsNullOrEmpty(m.InterimText)) InterimFrames++;
+            if (!string.IsNullOrEmpty(m.InputTranscriptionText)) InputFrames++;
+            if (!string.IsNullOrEmpty(m.ModelText)) ModelTextFrames++;
+            if (!string.IsNullOrEmpty(m.OutputTranscriptionText)) { OutputFrames++; LastOutputText = m.OutputTranscriptionText; }
+            if (m.TurnComplete || m.Interrupted) TurnCompleteFrames++;
+
             if (!string.IsNullOrEmpty(m.ModelText))
             {
                 _activeTurnText.Append(m.ModelText);
@@ -79,7 +101,9 @@ namespace Rapcha.Core
             TimedOut = timedOut;
             var raw = (text ?? "").Trim();
             if (raw.Length == 0) raw = LastInterimText.Trim();
-            var piece = TranscriptAcceptance.Accept(raw, RmsMean, RmsMax, vocabulary, RmsSamples);
+            // Windows extra: outputTranscription is not used on Android; it is only a last resort here.
+            if (raw.Length == 0) raw = LastOutputText.Trim();
+            var piece = TranscriptAcceptance.Accept(raw, RmsMean, RmsMax, vocabulary, RmsSamples, _levels);
             if (piece.Length > 0)
             {
                 CommittedText = TranscriptSeam.Append(CommittedText, piece);

@@ -9,11 +9,16 @@ namespace Rapcha.Win
         public const string BadKey = "Your Gemini API key was not accepted. Check it in Settings.";
         public const string NoInternet = "No internet connection. Check your Wi-Fi and try again.";
         public const string NoMic = "No microphone found. Plug one in or turn it on, then try again.";
-        public const string MicPrivacy = "Windows is blocking the microphone. Turn on Settings > Privacy > Microphone > Let desktop apps access your microphone.";
+        public const string MicSteps = "Turn on Microphone access and Let desktop apps access your microphone, then try again.";
+        public const string MicPrivacy = "Windows is blocking the microphone. " + MicSteps;
         public const string MicInUse = "The microphone is being used by another app. Close it and try again.";
-        public const string MicOther = "Rapcha could not open the microphone. Check it in Windows sound settings.";
+        public const string MicOther = "Rapcha could not open the microphone. " + MicSteps;
         public const string ConnectionLost = "Connection to Gemini was lost. Please try again.";
         public const string NothingHeard = "Didn't catch that. Try again.";
+        public const string NoSound = "No sound came from the microphone. " + MicSteps;
+        public const string TooQuiet = "I couldn't hear you. Speak closer to the microphone, or choose another one in Settings.";
+        public const string GeminiNothing = "Gemini returned nothing for your speech. Try again and speak a little longer.";
+        public const string GeminiSlow = "Gemini didn't answer in time. Check your internet and try again.";
 
         public static string For(LiveError e)
         {

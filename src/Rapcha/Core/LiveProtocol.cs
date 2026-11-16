@@ -123,6 +123,7 @@ namespace Rapcha.Core
             }
             msg.InterimText = MiniJson.Str(MiniJson.Obj(sc, "interimInputTranscription"), "text");
             msg.InputTranscriptionText = MiniJson.Str(MiniJson.Obj(sc, "inputTranscription"), "text");
+            msg.OutputTranscriptionText = MiniJson.Str(MiniJson.Obj(sc, "outputTranscription"), "text");
             msg.TurnComplete = MiniJson.Bool(sc, "turnComplete");
             msg.Interrupted = MiniJson.Bool(sc, "interrupted");
             return msg;
@@ -141,6 +142,7 @@ namespace Rapcha.Core
         public string ModelText = "";
         public string InterimText = "";
         public string InputTranscriptionText = "";
+        public string OutputTranscriptionText = "";
         public bool TurnComplete;
         public bool Interrupted;
 

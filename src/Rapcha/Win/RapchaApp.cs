@@ -6,28 +6,34 @@ using Rapcha.Core;
 
 namespace Rapcha.Win
 {
-    /// <summary>Owns the ring, the label, the tray icon and one dictation at a time.</summary>
+    /// <summary>Owns the ring, the Words bubble, the label, the tray icon and one dictation at a time.</summary>
     public sealed class RapchaApp : ApplicationContext
     {
         private enum Phase { Idle, Recording, Finishing }
 
         private const int CompleteTailMs = 180;          // FloatingDictationSessionManager.COMPLETE_TAIL_MS
-        private const int MaxRecordingSeconds = 195;     // DictationPiecePlanner.FORCE_AFTER_MS (phase 1: one piece)
+        private const int MaxRecordingSeconds = 195;     // DictationPiecePlanner.FORCE_AFTER_MS (one piece per session)
+        private const int MicHintAfterMs = 2000;
+        private const int MicHintPeak = 120;             // peak sample below this = "near zero"
         private const int EscHotkeyId = 0x5241;
 
         private readonly RingWindow _ring = new RingWindow();
         private readonly LabelWindow _label = new LabelWindow();
+        private readonly WordsBubble _bubble = new WordsBubble();
         private readonly NotifyIcon _tray = new NotifyIcon();
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
         private readonly HotkeyWindow _hotkeys = new HotkeyWindow();
-        private readonly Timer _watch = new Timer { Interval = 500 };
+        private readonly Timer _watch = new Timer { Interval = 250 };
 
         private Phase _phase = Phase.Idle;
         private int _generation;
+        private int _sessionNumber;
         private LiveSession _session;
         private WaveInRecorder _recorder;
         private IntPtr _target;
         private DateTime _startedAt;
+        private bool _gotPreview;
+        private bool _micHintShown;
         private SettingsForm _settings;
 
         public RapchaApp()
@@ -44,15 +50,21 @@ namespace Rapcha.Win
             _ring.Clicked += OnRingClicked;
             _ring.RightClicked += OnRingRightClicked;
             _ring.Moved += () => { if (_label.Visible) _label.HideNow(); };
+            _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
+            _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
+            _bubble.FixMicClicked += SettingsForm.OpenMicrophoneSettings;
             _hotkeys.HotkeyPressed += id => { if (id == EscHotkeyId) Cancel("Cancelled"); };
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
-            AppStorage.Log("Rapcha started");
+            AppStorage.Log("Rapcha " + typeof(RapchaApp).Assembly.GetName().Version + " started on " + Environment.OSVersion +
+                           (Environment.Is64BitOperatingSystem ? " x64" : " x86") + ", mics=[" + string.Join("; ", WaveInRecorder.ListDevices()) + "]");
 
             if (LiveSession.IsPlaceholder(AppStorage.LoadApiKey()))
-                OpenSettings("Welcome to Rapcha! Paste your Gemini API key below and press Save.");
+                OpenSettings("Welcome to Rapcha! Paste your Gemini API key, check that the microphone bar moves when you talk, then press Save.");
         }
+
+        private int Dpi => (int)Math.Round(96.0 * _ring.RingSize / RingWindow.RingDip);
 
         private void OnRingClicked()
         {
@@ -79,25 +91,34 @@ namespace Rapcha.Win
                 return;
             }
 
+            _settings?.PauseMeter();
             _target = TextDelivery.CaptureTarget();
             var vocab = AppStorage.LoadVocabulary();
             int gen = ++_generation;
-            var session = new LiveSession(key, vocab);
-            session.Log += AppStorage.Log;
+            int number = ++_sessionNumber;
+            var session = new LiveSession(key, vocab, levels: SilenceLevels.Windows);
+            session.Log += line => AppStorage.Log("[s" + number + "] " + line);
             session.Failed += err =>
             {
                 try { _ring.BeginInvoke(new Action(() => OnSessionFailed(gen, err))); } catch { }
+            };
+            session.Preview += words =>
+            {
+                try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording) { _gotPreview = true; _bubble.SetWords(words); } })); } catch { }
             };
 
             var recorder = new WaveInRecorder(
                 chunk => session.SendAudio(chunk),
                 level => _ring.Level = level);
-            var problem = recorder.Start(out var detail);
+            int device = WaveInRecorder.ResolveDevice(AppStorage.LoadMicDevice());
+            var problem = recorder.Start(device, out var detail);
+            AppStorage.Log("[s" + number + "] start: device=\"" + recorder.DeviceName + "\" format=" + recorder.FormatDescription +
+                           " attempts=[" + recorder.OpenAttempts + "] result=" + problem + (detail.Length > 0 ? " " + detail : ""));
             if (problem != MicProblem.None)
             {
-                AppStorage.Log("Mic problem: " + problem + " " + detail);
                 session.Dispose();
-                ShowLabel(MicMessage(problem), 6000, true);
+                ShowLabel(SettingsForm.MicHelp(problem), 8000, true);
+                _settings?.ResumeMeter();
                 return;
             }
 
@@ -105,8 +126,11 @@ namespace Rapcha.Win
             _recorder = recorder;
             _phase = Phase.Recording;
             _startedAt = DateTime.UtcNow;
+            _gotPreview = false;
+            _micHintShown = false;
+            _label.HideNow();
             _ring.State = RingState.Recording;
-            ShowLabel("Listening", 0);
+            _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
             _watch.Start();
             _ = session.ConnectAsync();
@@ -116,11 +140,16 @@ namespace Rapcha.Win
         {
             if (_phase != Phase.Recording) { _watch.Stop(); return; }
             var elapsed = DateTime.UtcNow - _startedAt;
-            if (elapsed.TotalSeconds > 1.5 && _recorder != null && _recorder.LooksSilentlyBlocked)
+            if (!_gotPreview && elapsed.TotalMilliseconds >= MicHintAfterMs && _recorder != null)
             {
-                Cancel(null);
-                ShowLabel(Messages.MicPrivacy, 8000, true);
-                return;
+                bool cantHear = _recorder.BytesCaptured == 0 || _recorder.LooksSilentlyBlocked || _recorder.RecentPeak < MicHintPeak;
+                if (cantHear && !_micHintShown)
+                {
+                    _micHintShown = true;
+                    AppStorage.Log("[s" + _sessionNumber + "] mic hint shown: bytes=" + _recorder.BytesCaptured + " recent_peak=" + _recorder.RecentPeak +
+                                   " all_zero=" + _recorder.LooksSilentlyBlocked);
+                }
+                _bubble.MicHint = cantHear;
             }
             if (elapsed.TotalSeconds >= MaxRecordingSeconds) _ = FinishAsync();
         }
@@ -130,10 +159,11 @@ namespace Rapcha.Win
             if (_phase != Phase.Recording) return;
             _phase = Phase.Finishing;
             int gen = _generation;
+            int number = _sessionNumber;
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
             _ring.State = RingState.Polishing;
-            ShowLabel("Polishing…", 0);
+            _bubble.Set(WordsBubble.Mode.Polishing, _gotPreview ? _session.Turn.LastInterimText : "");
 
             var recorder = _recorder;
             var session = _session;
@@ -145,38 +175,81 @@ namespace Rapcha.Win
             }
             catch (Exception ex)
             {
-                AppStorage.Log("Finish failed: " + ex.GetType().Name + " " + ex.Message);
+                AppStorage.Log("[s" + number + "] finish failed: " + ex.GetType().Name + " " + ex.Message);
             }
             finally
             {
                 session.Dispose();
             }
+            text = (text ?? "").Trim();
+            LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
             ResetToIdle();
 
-            text = (text ?? "").Trim();
             if (text.Length == 0)
             {
-                ShowLabel(Messages.NothingHeard, 2000);
+                var reason = EmptyReason(recorder, session);
+                AppStorage.Log("[s" + number + "] empty result shown as: " + reason);
+                _bubble.Set(WordsBubble.Mode.Warning, reason);
+                await Task.Delay(reason == Messages.NothingHeard ? 2000 : 5000);
+                if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
                 return;
             }
+
+            _bubble.Set(WordsBubble.Mode.Final, text);
             var result = TextDelivery.Deliver(text, _target);
-            AppStorage.Log("Delivered: " + result + " (" + text.Split(' ').Length + " words)");
+            AppStorage.Log("[s" + number + "] delivered: " + result);
+            await Task.Delay(900);
+            if (gen != _generation) return;
             switch (result)
             {
-                case TextDelivery.Result.Typed: ShowLabel("Typed ✓", 1500); break;
-                case TextDelivery.Result.Copied: ShowLabel("Copied ✓  Press Ctrl+V to paste", 1800); break;
-                default: ShowLabel("Couldn't use the clipboard. Try again.", 3000, true); break;
+                case TextDelivery.Result.Typed: _bubble.Set(WordsBubble.Mode.Done, "Typed ✓"); break;
+                case TextDelivery.Result.Copied: _bubble.Set(WordsBubble.Mode.Done, "Copied ✓  Press Ctrl+V to paste"); break;
+                default: _bubble.Set(WordsBubble.Mode.Warning, "Couldn't use the clipboard. Try again."); break;
             }
+            await Task.Delay(result == TextDelivery.Result.Typed ? 1300 : 2000);
+            if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
+        }
+
+        /// <summary>The real reason behind an empty result.</summary>
+        private static string EmptyReason(WaveInRecorder recorder, LiveSession session)
+        {
+            var turn = session.Turn;
+            if (recorder.BytesCaptured == 0 || session.FinishReason == "no_audio_sent") return Messages.NoSound;
+            if (recorder.LooksSilentlyBlocked) return Messages.NoSound;
+            if (session.FinishReason == "near_silent") return Messages.TooQuiet;
+            if (session.FinishReason == "setup_not_complete") return Messages.GeminiSlow;
+            bool hadSignal = !turn.IsNearSilent && turn.RmsSamples > 0;
+            bool serverSaidAnything = turn.InterimFrames + turn.InputFrames + turn.ModelTextFrames + turn.OutputFrames > 0;
+            if (session.FinishReason == "final_timeout" && !serverSaidAnything) return Messages.GeminiSlow;
+            if (hadSignal && !serverSaidAnything) return Messages.GeminiNothing;
+            return Messages.NothingHeard;
+        }
+
+        /// <summary>One line per session for rapcha.log. Counts and levels only, never words or the key.</summary>
+        private static void LogSessionSummary(int number, WaveInRecorder r, LiveSession s, string text)
+        {
+            var t = s.Turn;
+            AppStorage.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[s{0}] summary: device=\"{1}\" format={2} bytes_captured={3} buffers={4} empty_buffers={5} all_zero={6} " +
+                "chunks_sent={7} rms_mean={8:0} rms_max={9:0} peak={10} max_gain={11:0.00} setup_ms={12} " +
+                "server: interim={13} input={14} model_text={15} output={16} turn_complete={17} finish={18} timed_out={19} near_silent={20} " +
+                "result_chars={21}",
+                number, r.DeviceName, r.FormatDescription, r.BytesCaptured, r.BuffersReturned, r.EmptyBuffers, r.LooksSilentlyBlocked,
+                s.ChunksSent, t.RmsMean, t.RmsMax, t.Peak, s.MaxGain, s.SetupMs,
+                t.InterimFrames, t.InputFrames, t.ModelTextFrames, t.OutputFrames, t.TurnCompleteFrames, s.FinishReason, t.TimedOut, t.IsNearSilent,
+                text.Length));
         }
 
         private void Cancel(string message)
         {
             if (_phase != Phase.Recording) return;
             _generation++;
+            AppStorage.Log("[s" + _sessionNumber + "] cancelled");
             var recorder = _recorder;
             var session = _session;
             ResetToIdle();
+            _bubble.Close2();
             Task.Run(() => { try { recorder?.Abort(); } catch { } try { session?.Dispose(); } catch { } });
             if (message != null) ShowLabel(message, 1200);
             else _label.HideNow();
@@ -185,11 +258,12 @@ namespace Rapcha.Win
         private void OnSessionFailed(int gen, LiveError err)
         {
             if (gen != _generation || _phase == Phase.Idle) return;
-            AppStorage.Log("Session failed: " + err.Kind);
+            AppStorage.Log("[s" + _sessionNumber + "] session failed: " + err.Kind);
             _generation++;
             var recorder = _recorder;
             var session = _session;
             ResetToIdle();
+            _bubble.Close2();
             Task.Run(() => { try { recorder?.Abort(); } catch { } try { session?.Dispose(); } catch { } });
             var msg = Messages.For(err);
             ShowLabel(msg, 6000, true);
@@ -204,23 +278,12 @@ namespace Rapcha.Win
             _session = null;
             _recorder = null;
             _ring.State = RingState.Idle;
+            _settings?.ResumeMeter();
         }
 
         private void ShowLabel(string text, int hideAfterMs, bool warning = false)
         {
-            int dpi = (int)Math.Round(96.0 * _ring.RingSize / RingWindow.RingDip);
-            _label.ShowText(text, _ring.RingBounds, _ring.Edge, dpi, hideAfterMs, warning);
-        }
-
-        private static string MicMessage(MicProblem p)
-        {
-            switch (p)
-            {
-                case MicProblem.NoMicrophone: return Messages.NoMic;
-                case MicProblem.PrivacyBlocked: return Messages.MicPrivacy;
-                case MicProblem.InUse: return Messages.MicInUse;
-                default: return Messages.MicOther;
-            }
+            _label.ShowText(text, _ring.RingBounds, _ring.Edge, Dpi, hideAfterMs, warning);
         }
 
         private void OpenSettings(string message)
@@ -229,6 +292,7 @@ namespace Rapcha.Win
             {
                 _settings = new SettingsForm(message);
                 _settings.FormClosed += (s, e) => _settings = null;
+                if (_phase != Phase.Idle) _settings.PauseMeter();
                 _settings.Show();
             }
             else if (message != null)
@@ -246,6 +310,7 @@ namespace Rapcha.Win
             _tray.Dispose();
             _hotkeys.Dispose();
             _settings?.Close();
+            _bubble.Close();
             _label.Close();
             _ring.Close();
             ExitThread();

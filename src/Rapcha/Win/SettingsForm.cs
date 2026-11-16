@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -7,18 +8,29 @@ using Rapcha.Core;
 
 namespace Rapcha.Win
 {
-    /// <summary>Only two things: the Gemini API key and Custom Vocabulary.</summary>
+    /// <summary>Gemini API key, Microphone (test + choose + Windows permission) and Custom Vocabulary.</summary>
     public sealed class SettingsForm : Form
     {
         private readonly TextBox _key = new TextBox();
         private readonly CheckBox _show = new CheckBox();
+        private readonly ComboBox _mic = new ComboBox();
+        private readonly ProgressBar _level = new ProgressBar();
+        private readonly Label _micStatus = new Label();
+        private readonly Button _micSettings = new Button();
         private readonly TextBox _newWord = new TextBox();
         private readonly ListBox _words = new ListBox();
         private readonly Button _add = new Button();
         private readonly Button _remove = new Button();
         private readonly Button _save = new Button();
+        private readonly Button _copyLog = new Button();
         private readonly Label _status = new Label();
         private readonly List<string> _terms;
+        private readonly Timer _meterCheck = new Timer { Interval = 500 };
+
+        private WaveInRecorder _meter;
+        private DateTime _meterStarted;
+        private bool _meterPaused;
+        private float _lastLevel;
 
         public event Action Saved;
 
@@ -26,23 +38,22 @@ namespace Rapcha.Win
         {
             Text = "Rapcha settings";
             Icon = Program.AppIcon;
-            Font = new Font("Segoe UI", 11f);
+            Font = new Font("Segoe UI", 10.5f);
             AutoScaleMode = AutoScaleMode.Font;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
-            ClientSize = new Size(520, 560);
+            ClientSize = new Size(540, 780);
 
             var layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 9, AutoSize = false
+                Dock = DockStyle.Fill, Padding = new Padding(18, 12, 18, 12), ColumnCount = 1, AutoScroll = true
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-            var keyTitle = Title("Gemini API key");
-            var keyHelp = Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only.");
+            // API key
             _key.UseSystemPasswordChar = true;
             _key.Dock = DockStyle.Fill;
             _key.Text = AppStorage.LoadApiKey();
@@ -50,9 +61,34 @@ namespace Rapcha.Win
             _show.AutoSize = true;
             _show.CheckedChanged += (s, e) => _key.UseSystemPasswordChar = !_show.Checked;
 
-            var vocabTitle = Title("Custom Vocabulary");
-            var vocabHelp = Help("Add names and words you want spelled your way, like \"Prince Nii\".");
+            // Microphone
+            _mic.DropDownStyle = ComboBoxStyle.DropDownList;
+            _mic.Dock = DockStyle.Fill;
+            _mic.Items.Add("Windows default microphone");
+            foreach (var d in WaveInRecorder.ListDevices()) _mic.Items.Add(d);
+            var saved = AppStorage.LoadMicDevice();
+            int idx = saved.Length == 0 ? 0 : _mic.Items.IndexOf(saved);
+            _mic.SelectedIndex = idx < 0 ? 0 : idx;
+            _mic.SelectedIndexChanged += (s, e) =>
+            {
+                AppStorage.SaveMicDevice(_mic.SelectedIndex <= 0 ? "" : (string)_mic.SelectedItem);
+                RestartMeter();
+            };
+            _level.Dock = DockStyle.Fill;
+            _level.Height = 22;
+            _level.Style = ProgressBarStyle.Continuous;
+            _level.Maximum = 100;
+            _micStatus.AutoSize = true;
+            _micStatus.MaximumSize = new Size(490, 0);
+            _micStatus.Text = "Say something: the bar should move when you talk.";
+            _micSettings.Text = "Open microphone settings";
+            _micSettings.AutoSize = true;
+            _micSettings.Padding = new Padding(14, 6, 14, 6);
+            _micSettings.Font = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+            _micSettings.Click += (s, e) => OpenMicrophoneSettings();
+            _meterCheck.Tick += (s, e) => CheckMeter();
 
+            // Vocabulary
             var addRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true, Margin = new Padding(0) };
             addRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             addRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -67,42 +103,157 @@ namespace Rapcha.Win
             _terms = AppStorage.LoadVocabulary();
             _words.Dock = DockStyle.Fill;
             _words.IntegralHeight = false;
-            _words.Height = 160;
+            _words.Height = 110;
             foreach (var t in _terms) _words.Items.Add(t);
             _words.KeyDown += (s, e) => { if (e.KeyCode == Keys.Delete) RemoveWord(); };
-
             _remove.Text = "Remove selected";
             _remove.AutoSize = true;
             _remove.Click += (s, e) => RemoveWord();
 
+            // Bottom
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Margin = new Padding(0, 10, 0, 0) };
             _save.Text = "Save";
             _save.AutoSize = true;
             _save.Padding = new Padding(18, 4, 18, 4);
             _save.Click += async (s, e) => await SaveAsync();
+            _copyLog.Text = "Copy log";
+            _copyLog.AutoSize = true;
+            _copyLog.Click += (s, e) => CopyLog();
             bottom.Controls.Add(_save);
+            bottom.Controls.Add(_copyLog);
 
             _status.AutoSize = true;
-            _status.MaximumSize = new Size(480, 0);
-            _status.ForeColor = Color.FromArgb(120, 30, 30);
+            _status.MaximumSize = new Size(490, 0);
             _status.Text = message ?? "";
+            ShowMessage(message);
 
-            layout.Controls.Add(keyTitle);
-            layout.Controls.Add(keyHelp);
+            layout.Controls.Add(Title("Gemini API key"));
+            layout.Controls.Add(Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only."));
             layout.Controls.Add(_key);
             layout.Controls.Add(_show);
-            layout.Controls.Add(vocabTitle);
-            layout.Controls.Add(vocabHelp);
+            layout.Controls.Add(Title("Microphone"));
+            layout.Controls.Add(_mic);
+            layout.Controls.Add(_level);
+            layout.Controls.Add(_micStatus);
+            layout.Controls.Add(_micSettings);
+            layout.Controls.Add(Title("Custom Vocabulary"));
+            layout.Controls.Add(Help("Add names and words you want spelled your way, like \"Prince Nii\"."));
             layout.Controls.Add(addRow);
             layout.Controls.Add(_words);
             layout.Controls.Add(_remove);
             layout.Controls.Add(_status);
             layout.Controls.Add(bottom);
             layout.RowCount = layout.Controls.Count;
-            for (int i = 0; i < layout.RowCount; i++)
-                layout.RowStyles.Add(i == 7 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
+            for (int i = 0; i < layout.RowCount; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             Controls.Add(layout);
-            AcceptButton = null;
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            var wa = Screen.FromControl(this).WorkingArea;
+            if (Height > wa.Height - 20) Height = wa.Height - 20;
+            CenterToScreen();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            RestartMeter();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            StopMeter();
+            _meterCheck.Dispose();
+            base.OnFormClosed(e);
+        }
+
+        public static void OpenMicrophoneSettings()
+        {
+            try { Process.Start(new ProcessStartInfo("ms-settings:privacy-microphone") { UseShellExecute = true }); }
+            catch (Exception ex) { AppStorage.Log("Could not open microphone settings: " + ex.Message); }
+        }
+
+        /// <summary>The ring is about to record: free the microphone.</summary>
+        public void PauseMeter() { _meterPaused = true; StopMeter(); }
+
+        public void ResumeMeter()
+        {
+            _meterPaused = false;
+            if (Visible && !IsDisposed) RestartMeter();
+        }
+
+        private void RestartMeter()
+        {
+            StopMeter();
+            if (_meterPaused || IsDisposed) return;
+            int device = WaveInRecorder.ResolveDevice(_mic.SelectedIndex <= 0 ? "" : (string)_mic.SelectedItem);
+            _meter = new WaveInRecorder(_ => { }, level =>
+            {
+                _lastLevel = level;
+                try { BeginInvoke(new Action(() => { if (!IsDisposed) _level.Value = (int)(level * 100); })); } catch { }
+            });
+            var problem = _meter.Start(device, out var detail);
+            AppStorage.Log("Mic test: device=\"" + _meter.DeviceName + "\" result=" + problem + " format=" + _meter.FormatDescription + " attempts=[" + _meter.OpenAttempts + "] " + detail);
+            if (problem != MicProblem.None)
+            {
+                _meter = null;
+                SetMicStatus(MicHelp(problem), true);
+                return;
+            }
+            _meterStarted = DateTime.UtcNow;
+            SetMicStatus("Say something: the bar should move when you talk.", false);
+            _meterCheck.Start();
+        }
+
+        private void StopMeter()
+        {
+            _meterCheck.Stop();
+            var m = _meter;
+            _meter = null;
+            if (m != null) Task.Run(() => m.Abort());
+            if (!IsDisposed) _level.Value = 0;
+        }
+
+        private void CheckMeter()
+        {
+            var m = _meter;
+            if (m == null) return;
+            if ((DateTime.UtcNow - _meterStarted).TotalSeconds < 1.5) return;
+            if (m.BytesCaptured == 0)
+                SetMicStatus("No sound is coming from this microphone. " + Messages.MicSteps, true);
+            else if (m.LooksSilentlyBlocked)
+                SetMicStatus("Windows is giving Rapcha silence. " + Messages.MicSteps, true);
+            else if (m.MaxPeak > 300)
+                SetMicStatus("Your microphone works ✓", false, true);
+        }
+
+        private void SetMicStatus(string text, bool bad, bool good = false)
+        {
+            _micStatus.Text = text;
+            _micStatus.ForeColor = bad ? Color.FromArgb(150, 30, 30) : good ? Color.FromArgb(30, 110, 40) : SystemColors.ControlText;
+        }
+
+        public static string MicHelp(MicProblem p)
+        {
+            switch (p)
+            {
+                case MicProblem.NoMicrophone: return Messages.NoMic;
+                case MicProblem.PrivacyBlocked: return Messages.MicPrivacy;
+                case MicProblem.InUse: return Messages.MicInUse;
+                default: return Messages.MicOther;
+            }
+        }
+
+        private void CopyLog()
+        {
+            try
+            {
+                Clipboard.SetText(AppStorage.ReadLogTail());
+                ShowMessage("Log copied. Paste it into a message to us. It has no key and none of your words.", true);
+            }
+            catch (Exception ex) { ShowMessage("Could not copy the log: " + ex.Message); }
         }
 
         public void ShowMessage(string text, bool good = false)
@@ -113,12 +264,12 @@ namespace Rapcha.Win
 
         private static Label Title(string text) => new Label
         {
-            Text = text, AutoSize = true, Font = new Font("Segoe UI", 13f, FontStyle.Bold), Margin = new Padding(0, 8, 0, 2)
+            Text = text, AutoSize = true, Font = new Font("Segoe UI", 12.5f, FontStyle.Bold), Margin = new Padding(0, 10, 0, 2)
         };
 
         private static Label Help(string text) => new Label
         {
-            Text = text, AutoSize = true, MaximumSize = new Size(480, 0), ForeColor = Color.FromArgb(80, 80, 80), Margin = new Padding(0, 0, 0, 6)
+            Text = text, AutoSize = true, MaximumSize = new Size(490, 0), ForeColor = Color.FromArgb(80, 80, 80), Margin = new Padding(0, 0, 0, 6)
         };
 
         private void AddWord()
@@ -154,6 +305,7 @@ namespace Rapcha.Win
             {
                 AppStorage.SaveApiKey(key);
                 AppStorage.SaveVocabulary(_terms);
+                AppStorage.SaveMicDevice(_mic.SelectedIndex <= 0 ? "" : (string)_mic.SelectedItem);
             }
             catch (Exception ex)
             {
@@ -194,6 +346,7 @@ namespace Rapcha.Win
                     var done = await Task.WhenAny(failed.Task, deadline, Task.Delay(100));
                     if (done == deadline) return failure ?? new LiveError(LiveErrorKind.NoInternet, "Timed out waiting for Gemini");
                 }
+                AppStorage.Log("Key check: " + (failure == null ? "ok, setupComplete after " + session.SetupMs + " ms" : failure.Kind.ToString()));
                 return failure;
             }
             finally { session.Dispose(); }

@@ -43,7 +43,9 @@ namespace Rapcha.Core
         private readonly object _queueLock = new object();
         private readonly Queue<byte[]> _audioQueue = new Queue<byte[]>();
         private readonly SpeechGain _gain = new SpeechGain();
-        private readonly LiveTurnState _turn = new LiveTurnState();
+        private readonly LiveTurnState _turn;
+        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+        private string _lastPreview = "";
         private readonly TaskCompletionSource<bool> _setupTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<string> _finalTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         private Task _pump = Task.CompletedTask;
@@ -57,14 +59,25 @@ namespace Rapcha.Core
         public event Action<LiveError> Failed;
         public event Action<string> Log;
 
+        /// <summary>Live words for the Words bubble (finalized + interim preview), on a thread-pool thread.</summary>
+        public event Action<string> Preview;
+
+        // Diagnostics (no words).
+        public int ChunksSent { get; private set; }
+        public long SetupMs { get; private set; } = -1;
+        public double MaxGain { get; private set; } = 1.0;
+        public string FinishReason { get; private set; } = "";
+
         public bool IsSetupComplete => _setupComplete;
 
         /// <summary>The Live endpoint. Only tests change this (to a local fake server).</summary>
         public Uri Endpoint { get; set; } = new Uri(LiveProtocol.WsBaseUrl);
         public LiveTurnState Turn => _turn;
 
-        public LiveSession(string apiKey, IList<string> vocabulary, string model = LiveProtocol.DefaultModel, bool smartMode = true)
+        public LiveSession(string apiKey, IList<string> vocabulary, string model = LiveProtocol.DefaultModel, bool smartMode = true,
+            SilenceLevels levels = null)
         {
+            _turn = new LiveTurnState(levels ?? SilenceLevels.Android);
             _apiKey = (apiKey ?? "").Trim();
             _model = string.IsNullOrWhiteSpace(model) ? LiveProtocol.DefaultModel : model.Trim();
             _smartMode = smartMode;
@@ -124,7 +137,10 @@ namespace Rapcha.Core
             {
                 var done = await Task.WhenAny(_setupTcs.Task, Task.Delay(SetupWaitOnFinishMs)).ConfigureAwait(false);
                 if (done != _setupTcs.Task || !_setupComplete)
+                {
+                    FinishReason = "setup_not_complete";
                     return SettleLocked(_turn.LastInterimText, true, _vocabulary);
+                }
             }
             // Drain every queued chunk, in order, before activityEnd.
             for (int guard = 0; guard < 1000; guard++)
@@ -141,8 +157,15 @@ namespace Rapcha.Core
                 if (_closing) break;
             }
 
+            if (_turn.RmsSamples == 0)
+            {
+                FinishReason = "no_audio_sent";
+                _turn.MarkActivityEnded();
+                return SettleLocked("", false, _vocabulary);
+            }
             if (_turn.IsNearSilent)
             {
+                FinishReason = "near_silent";
                 _turn.MarkActivityEnded();
                 return SettleLocked("", false, _vocabulary);
             }
@@ -154,10 +177,16 @@ namespace Rapcha.Core
             }
             catch (Exception)
             {
+                FinishReason = "activity_end_send_failed";
                 return SettleLocked(_turn.LastInterimText, true, _vocabulary);
             }
             var finished = await Task.WhenAny(_finalTcs.Task, Task.Delay(LiveProtocol.FinalTranscriptTimeoutMs)).ConfigureAwait(false);
-            if (finished == _finalTcs.Task) return _finalTcs.Task.Result;
+            if (finished == _finalTcs.Task)
+            {
+                if (FinishReason.Length == 0) FinishReason = "final_received";
+                return _finalTcs.Task.Result;
+            }
+            FinishReason = "final_timeout";
             LogLine("Final transcript timed out; using last interim");
             return SettleLocked(_turn.LastInterimText, true, _vocabulary);
         }
@@ -212,6 +241,8 @@ namespace Rapcha.Core
                     var output = _gain.Process(chunk, true);
                     await SendTextAsync(LiveProtocol.BuildAudioMessage(output, 0, output.Length)).ConfigureAwait(false);
                     lock (_turn) _turn.OnAudioSent(chunk);
+                    ChunksSent++;
+                    if (_gain.CurrentGain > MaxGain) MaxGain = _gain.CurrentGain;
                 }
             }
             catch (Exception e)
@@ -265,13 +296,16 @@ namespace Rapcha.Core
 
         private void OnRemoteClosed(int code, string reason)
         {
-            LogLine("WebSocket closed (code " + code + ")");
+            LogLine("WebSocket closed (code " + code + (string.IsNullOrEmpty(reason) ? "" : ", " + (reason.Length > 120 ? reason.Substring(0, 120) : reason)) + ")");
             if (_closing) return;
             if (_turn.ActivityEnded)
             {
                 // Complete was already pressed: use what we have instead of reporting an error.
                 if (!_finalTcs.Task.IsCompleted)
+                {
+                    FinishReason = "socket_closed_after_end";
                     _finalTcs.TrySetResult(SettleLocked(_turn.LastInterimText, true, _vocabulary));
+                }
                 return;
             }
             if (LiveProtocol.IsApiKeyError(0, reason))
@@ -291,7 +325,8 @@ namespace Rapcha.Core
             if (m.SetupComplete)
             {
                 _setupComplete = true;
-                LogLine("setupComplete");
+                SetupMs = _clock.ElapsedMilliseconds;
+                LogLine("setupComplete after " + SetupMs + " ms");
                 _setupTcs.TrySetResult(true);
                 lock (_queueLock) StartPumpLocked();
                 return;
@@ -306,11 +341,18 @@ namespace Rapcha.Core
                 return;
             }
             if (!m.HasServerContent) return;
+            string preview;
             lock (_turn)
             {
                 var completed = _turn.OnServerContent(m);
                 if (completed != null && !_finalTcs.Task.IsCompleted)
                     _finalTcs.TrySetResult(SettleLocked(completed, false, _vocabulary));
+                preview = _turn.LastInterimText;
+            }
+            if (!string.IsNullOrEmpty(preview) && preview != _lastPreview)
+            {
+                _lastPreview = preview;
+                try { Preview?.Invoke(preview); } catch { }
             }
         }
 

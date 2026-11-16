@@ -30,6 +30,33 @@ namespace Rapcha.Win
         private static string VocabPath => Path.Combine(Folder, "vocabulary.txt");
         private static string RingPath => Path.Combine(Folder, "ring.txt");
         public static string LogPath => Path.Combine(Folder, "rapcha.log");
+        private static string MicPath => Path.Combine(Folder, "microphone.txt");
+
+        /// <summary>Saved microphone name; "" means the Windows default.</summary>
+        public static string LoadMicDevice()
+        {
+            try { return File.Exists(MicPath) ? File.ReadAllText(MicPath, Encoding.UTF8).Trim() : ""; }
+            catch { return ""; }
+        }
+
+        public static void SaveMicDevice(string name)
+        {
+            try { WriteAtomic(MicPath, new UTF8Encoding(false).GetBytes((name ?? "").Trim())); } catch { }
+        }
+
+        /// <summary>The last part of the log, for the Copy log button.</summary>
+        public static string ReadLogTail(int maxLines = 400)
+        {
+            try
+            {
+                if (!File.Exists(LogPath)) return "(no log yet)";
+                var lines = File.ReadAllLines(LogPath);
+                int start = Math.Max(0, lines.Length - maxLines);
+                var header = "Rapcha for Windows " + typeof(AppStorage).Assembly.GetName().Version + " on " + Environment.OSVersion + Environment.NewLine;
+                return header + string.Join(Environment.NewLine, lines, start, lines.Length - start);
+            }
+            catch (Exception e) { return "(could not read log: " + e.Message + ")"; }
+        }
 
         public static string LoadApiKey()
         {
@@ -98,10 +125,12 @@ namespace Rapcha.Win
             {
                 var fi = new FileInfo(LogPath);
                 if (fi.Exists && fi.Length > 256 * 1024) fi.Delete();
-                File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + line + Environment.NewLine);
+                lock (LogLock) File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + line + Environment.NewLine);
             }
             catch { }
         }
+
+        private static readonly object LogLock = new object();
 
         private static void WriteAtomic(string path, byte[] bytes)
         {
