@@ -495,7 +495,20 @@ namespace Rapcha.Win
                         if (!Done()) return;
                         if (!Check("tap")) { Fail(4, "tap"); return; }
                         // Empty space far from any text: "No text found there."
-                        _overlay.SimulateDrag(new Box(_overlay.ClientSize.Width - 260, _overlay.ClientSize.Height / 2, 200, 40));
+                    {
+                        // Find a spot with no recognised text at all.
+                        var layout = _overlay.Ocr.Layout;
+                        Box empty = new Box();
+                        for (int y = 60; y + 40 < _overlay.ClientSize.Height - 140 && empty.IsEmpty; y += 20)
+                            for (int x = 40; x + 160 < _overlay.ClientSize.Width - 40 && empty.IsEmpty; x += 20)
+                            {
+                                var b = new Box(x, y, 160, 40);
+                                if (layout.Lines.All(l => l.Box.Inflate(6).Intersect(b).IsEmpty)) empty = b;
+                            }
+                        AppStorage.Log("Selftest ocr: empty spot=" + (empty.IsEmpty ? "none" : empty.ToString()));
+                        if (empty.IsEmpty) { Fail(4, "no empty spot on screen"); return; }
+                        _overlay.SimulateDrag(empty);
+                    }
                         stage = 5;
                         break;
                     case 5:
