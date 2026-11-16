@@ -236,6 +236,8 @@ namespace Rapcha.Win
 
         private async Task<int> Steps()
         {
+            SpeechReader.PaceSilent = true;   // readings last as long as out loud, so the flicker check sees reading start
+            Voices.ResetShared();
             _screen = Screen.PrimaryScreen.Bounds;
             _dpi = Native.DpiAt(_screen.X + _screen.Width / 2, _screen.Y + _screen.Height / 2);
             Log("screen " + _screen.Width + "x" + _screen.Height + " dpi=" + _dpi);

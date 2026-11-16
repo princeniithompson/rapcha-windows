@@ -37,11 +37,42 @@ namespace Rapcha.Win
             try { using (var s = new SpeechSynthesizer()) return s.GetInstalledVoices().Count; } catch { return 0; }
         }
 
+        /// <summary>
+        /// Self-test only: the silent output takes the audio at the speakers' pace (instead of as fast as the voice
+        /// can make it), so a reading lasts as long as it would out loud and what happens while it plays can be seen.
+        /// </summary>
+        public static bool PaceSilent;
+
+        private sealed class PacedSink : Stream
+        {
+            private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+            private double _dueMs;   // when the audio written so far would have finished playing
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                double now = _clock.Elapsed.TotalMilliseconds;
+                if (_dueMs < now) _dueMs = now;   // a new reading starts now
+                _dueMs += count / 32.0;           // 16 kHz, 16-bit, mono: 32 bytes a millisecond
+                int wait = (int)(_dueMs - now) - 60;
+                if (wait > 0) System.Threading.Thread.Sleep(wait);
+            }
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => 0;
+            public override long Position { get => 0; set { } }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => 0;
+            public override long Seek(long offset, SeekOrigin origin) => 0;
+            public override void SetLength(long value) { }
+        }
+
         private SpeechSynthesizer Synth()
         {
             if (_synth != null) return _synth;
             _synth = new SpeechSynthesizer();
-            if (_silentOutput) _synth.SetOutputToWaveStream(new MemoryStream());
+            if (_silentOutput && PaceSilent)
+                _synth.SetOutputToAudioStream(new PacedSink(), new System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, System.Speech.AudioFormat.AudioBitsPerSample.Sixteen, System.Speech.AudioFormat.AudioChannel.Mono));
+            else if (_silentOutput) _synth.SetOutputToWaveStream(new MemoryStream());
             else _synth.SetOutputToDefaultAudioDevice();
             if (!string.IsNullOrEmpty(_voiceName))
             {
