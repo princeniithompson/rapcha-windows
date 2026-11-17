@@ -86,6 +86,20 @@ Rapcha also keeps the same list (without words) in `%AppData%\Rapcha\diagnostics
 
 **Microphone always in use (fixed in v19).** The level bar in Settings → Microphone used to keep the microphone open the whole time the Settings page was open, even behind other windows or minimised, and opened it again after every dictation, so Windows showed the microphone as in use all the time. Now the bar only runs when you press **Check level**, stops after 30 seconds, and stops as soon as you switch to another window.
 
+## Quiet microphones, one microphone, older processors (v20)
+
+- **One microphone stream.** Rapcha opens the microphone once per dictation. Built-in Windows speech no longer opens
+  it a second time; it gets Rapcha's stream, like Whisper. Diagnostics shows `mic_opens_this_session=1`.
+- **Mic boost.** Settings → Microphone → *Mic boost for offline typing*: **Auto (recommended)**, Off, or a fixed
+  +6 / +12 / +18 / +24 dB. Auto lifts quiet speech to about −11 dBFS (up to +24 dB), keeps silence quiet (noise gate),
+  and never clips (soft limiter). Diagnostics logs the gain every second (`[agc] ... agc second N: gain_db ...`).
+- **Older processors.** Rapcha stays 32-bit. Whisper ships in two builds: AVX2 for newer processors and an SSE build
+  (SSE2 + SSE3/SSSE3 only, no AVX, AVX2, FMA, F16C, BMI2 or AVX-512) for processors such as the Celeron N3350. Rapcha
+  checks the processor when it starts Whisper; if it lacks SSSE3 it says so and uses built-in Windows speech.
+  CI checks the SSE build with Intel SDE pretending to be a Goldmont (N3350-class) processor.
+- **Windows' newer speech recogniser** (Windows.Media.SpeechRecognition) is not used: its free-form dictation is
+  Microsoft's online service, and it always opens the microphone itself. Diagnostics shows what it offers on your PC.
+
 ## Snooze
 
 Drag the ring to the middle of the screen and hold it still for about 3 seconds. A round **Snooze** circle appears in the middle; drop the ring on it and Rapcha hides for 19 minutes (change it in **Settings → Snooze**: 19 minutes, 1 hour, 2 hours, or any number of minutes). It comes back by itself, in the same spot. Quick drags across the screen never show the circle, and dropping the ring anywhere else docks it at the edge as usual.

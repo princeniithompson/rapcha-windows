@@ -17,6 +17,8 @@ namespace Rapcha.Win
         private readonly TextBox _key = new TextBox();
         private readonly CheckBox _show = new CheckBox();
         private readonly ComboBox _mic = new ComboBox();
+        private readonly ComboBox _boost = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
+        internal ComboBox MicBoostPicker => _boost;
         private readonly ProgressBar _level = new ProgressBar();
         private readonly Label _micStatus = new Label();
         private readonly PillButton _micSettings = new PillButton();
@@ -120,6 +122,10 @@ namespace Rapcha.Win
             _checkLevel.Text = "Check level";
             _checkLevel.AutoSize = true;
             _checkLevel.Click += (s, e) => { if (_meter != null) StopMeter("you pressed Stop"); else RestartMeter(); };
+            // v20: mic boost for offline typing (quiet laptop microphones)
+            foreach (var c in MicBoostSetting.Choices) _boost.Items.Add(MicBoostSetting.Label(c));
+            _boost.SelectedIndex = Math.Max(0, Array.IndexOf(MicBoostSetting.Choices, MicBoostSetting.Normalize(AppStorage.LoadMicBoost())));
+            _boost.SelectedIndexChanged += (s, e) => AppStorage.SaveMicBoost(MicBoostSetting.Choices[Math.Max(0, _boost.SelectedIndex)]);
             _micSettings.Text = "Open microphone settings";
             _micSettings.Click += (s, e) => OpenMicrophoneSettings();
             _meterCheck.Tick += (s, e) => CheckMeter();
@@ -171,7 +177,8 @@ namespace Rapcha.Win
             _layout.Controls.Add(Card("Gemini API key",
                 Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only."),
                 _key, _show, Row(_save), _status));
-            _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_checkLevel, _micSettings)));
+            _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_checkLevel, _micSettings),
+                Help("Mic boost for offline typing. Auto makes a quiet microphone loud enough for offline speech without distortion."), _boost));
             _layout.Controls.Add(_micTest.Card);
             _micTest.Starting += () => StopMeter("Test microphone started");            // one recording at a time
             _layout.Controls.Add(_offlineCard.Card);

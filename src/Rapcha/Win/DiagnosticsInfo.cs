@@ -81,6 +81,18 @@ namespace Rapcha.Win
             sb.AppendLine("Report made: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " (PC local time, UTC" + TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).ToString(@"hh\:mm") + ")");
             sb.AppendLine("Windows: " + WindowsText());
             sb.AppendLine("CPU: " + Reg(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString").Trim() + ", " + Environment.ProcessorCount + " logical cores, AVX=" + f.Avx + " AVX2=" + f.Avx2);
+            try
+            {
+                var cf = CpuProbe.Features;
+                sb.AppendLine("CPU features: " + cf + (CpuProbe.CpuidNote.Length > 0 ? " (" + CpuProbe.CpuidNote + ")" : ""));
+                sb.AppendLine("Rapcha process: " + (Environment.Is64BitProcess ? "64-bit" : "32-bit") + " on " + (Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit") + " Windows");
+                var wb = WhisperNative.ForceVariant != null ? (WhisperNative.ForceVariant == "avx2" ? WhisperBuild.Avx2 : WhisperBuild.Sse) : CpuFeatures.Choose(cf);
+                string v = wb == WhisperBuild.Avx2 ? "avx2" : "sse";
+                sb.AppendLine("Whisper build for this CPU: " + (wb == WhisperBuild.None ? "none - " + CpuFeatures.Why(cf) : v + " (" + WhisperNative.BuildFlags(v) + ")") +
+                              "; loaded: " + WhisperNative.Status + (WhisperNative.Status == WhisperNative.State.Ready ? " " + WhisperNative.Variant + " system_info=" + WhisperNative.SystemInfo() : ""));
+            }
+            catch (Exception e) { sb.AppendLine("CPU features: failed " + e.GetType().Name); }
+            sb.AppendLine("Mic boost for offline typing: " + MicBoostSetting.Label(AppStorage.LoadMicBoost()));
             sb.AppendLine("Memory: total " + f.TotalRamMb + " MB, free now " + DeviceProbe.FreeRamMb() + " MB; Rapcha uses " + priv + " MB (private bytes); free disk " + DeviceProbe.FreeDiskMb() + " MB");
             sb.AppendLine("Device level (tier): " + DeviceTiers.Name(DeviceProbe.Tier) + (DeviceProbe.Override != null ? " (FAKED for a test)" : ""));
             sb.AppendLine("Rapcha running for: " + (int)up.TotalHours + " h " + up.Minutes + " min");
@@ -166,6 +178,9 @@ namespace Rapcha.Win
             sb.AppendLine();
             sb.AppendLine("== Microphones ==");
             try { sb.Append(Devices()); } catch (Exception e) { sb.AppendLine("devices failed: " + e.GetType().Name); }
+            sb.AppendLine();
+            sb.AppendLine("== Windows modern speech recogniser ==");
+            try { sb.AppendLine(ModernSpeech.Probe()); } catch (Exception e) { sb.AppendLine("probe failed: " + e.GetType().Name); }
             sb.AppendLine();
             sb.AppendLine("== Microphone right now ==");
             sb.AppendLine(MicTracker.NowText());

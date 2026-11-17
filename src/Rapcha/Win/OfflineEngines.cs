@@ -160,12 +160,14 @@ namespace Rapcha.Win
                 string problems;
                 lock (_problems) problems = _problems.Count == 0 ? "none" : string.Join(",", _problems.Select(p => p.Key + ":" + p.Value));
                 return "engine=builtin input=" + (OwnMicrophone ? "windows_default_mic" : "rapcha_audio") + " phrases=" + _recognized + " hypotheses=" + _hypotheses +
-                       " bytes=" + _stream.Written + " max_gain=" + _gain.CurrentGain.ToString("0.0", CultureInfo.InvariantCulture) + " sapi_level_max=" + _maxLevel + " signal_problems=" + problems;
+                       " bytes=" + _stream.Written + (OwnGain ? " max_gain=" + _gain.CurrentGain.ToString("0.0", CultureInfo.InvariantCulture) : " gain=mic_boost") + " sapi_level_max=" + _maxLevel + " signal_problems=" + problems;
             }
         }
 
         /// <summary>v18: built-in speech listens to the Windows default microphone itself (true) or to Rapcha's audio (false).</summary>
         public bool OwnMicrophone { get; private set; }
+        /// <summary>v20: false when Rapcha's automatic mic boost already levelled the audio (then this lighter gain is skipped).</summary>
+        public bool OwnGain { get; set; } = true;
         private int _micId;
         private void ReleaseMic(string why) { if (_micId != 0) { MicTracker.Closed(_micId, why); _micId = 0; } }
         private readonly SpeechGain _gain = new SpeechGain();
@@ -269,7 +271,7 @@ namespace Rapcha.Win
         public void Feed(byte[] pcm)
         {
             if (_disposed || pcm == null || pcm.Length == 0 || OwnMicrophone) return;
-            _stream.Write(_gain.Process(pcm, true));
+            _stream.Write(OwnGain ? _gain.Process(pcm, true) : pcm);
         }
 
         public async Task<string> FinishAsync()
@@ -475,7 +477,8 @@ namespace Rapcha.Win
                 OfflineFallback = OfflineSettings.Fallback,
                 Tier = tier,
                 WhisperModelReady = model != null && ModelStore.IsInstalled(model),
-                WhisperBlocked = st == WhisperNative.State.Blocked || st == WhisperNative.State.NotBundled || st == WhisperNative.State.Failed ||
+                WhisperBlocked = st == WhisperNative.State.Blocked || st == WhisperNative.State.NotBundled || st == WhisperNative.State.Failed || st == WhisperNative.State.CpuUnsupported ||
+                                 CpuFeatures.Choose(CpuProbe.Features) == WhisperBuild.None ||
                                  WhisperNative.SimulateBlocked || !WhisperNative.IsBundled,
                 WhisperFitsMemory = model != null && WhisperModels.FitsInFreeMemory(model, DeviceProbe.FreeRamMb()),
                 BuiltInAvailable = BuiltInSpeech.Available,
@@ -495,6 +498,7 @@ namespace Rapcha.Win
                     catch (Exception e) { AppStorage.Log("Offline: Whisper start failed " + e.GetType().Name); }
                 }
                 if (state == WhisperNative.State.Blocked) note = WhisperNative.BlockedMessage;
+                if (state == WhisperNative.State.CpuUnsupported) note = WhisperNative.CpuMessage;
                 if (!BuiltInSpeech.Available) return null;
                 choice = new EngineChoice { Ok = true, Engine = SpeechEngine.BuiltIn };
             }

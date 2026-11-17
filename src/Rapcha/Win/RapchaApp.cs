@@ -74,7 +74,7 @@ namespace Rapcha.Win
         private const string TrayIdle = "Rapcha - click the ring to talk";
 
         /// <param name="showMain">A manual launch (double-click, shortcut): show the main window. Autostart stays quiet.</param>
-        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null, string selfTestV18 = null, string selfTestV19 = null)
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null, string selfTestV18 = null, string selfTestV19 = null, string selfTestV20 = null)
         {
             _selfTestOcr = selfTestOcr;
             _selfTestRing = selfTestRing;
@@ -147,7 +147,7 @@ namespace Rapcha.Win
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
-            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null || selfTestV18 != null || selfTestV19 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
+            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null || selfTestV18 != null || selfTestV19 != null || selfTestV20 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
             else if (Snooze.Active) { AppStorage.Log("Snooze: still on after a restart (" + Snooze.LeftText + ")"); ApplySnooze(); }
             ShellWindows.Hook();
             ShellWindows.ForegroundChanged += OnForegroundChanged;
@@ -179,6 +179,7 @@ namespace Rapcha.Win
             if (selfTestV17 != null) { new V17SelfTest(this, selfTestV17).Start(); return; }
             if (selfTestV18 != null) { new V18SelfTest(this, selfTestV18).Start(); return; }
             if (selfTestV19 != null) { new V19SelfTest(this, selfTestV19).Start(); return; }
+            if (selfTestV20 != null) { new V20SelfTest(this, selfTestV20).Start(); return; }
             if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
         }
 
@@ -296,6 +297,28 @@ namespace Rapcha.Win
                    " whisper_model_ready=" + i.WhisperModelReady + " whisper_blocked=" + i.WhisperBlocked + " whisper_fits_memory=" + i.WhisperFitsMemory + " built_in_available=" + i.BuiltInAvailable + ")";
         }
 
+        private int _micOpensAtStart;
+        private MicAgc _agc;
+        /// <summary>v20: microphone opens during the last dictation (the self-test checks it is exactly 1).</summary>
+        internal int LastSessionMicOpens { get; private set; } = -1;
+        /// <summary>v20 self-test only: the last dictation's final text, kept in memory (never logged or saved).</summary>
+        internal string LastResultForTest { get; private set; }
+        internal MicAgc LastAgc => _agc;
+
+        /// <summary>
+        /// v20: the offline engines get the microphone stream through the automatic mic boost (Settings → Microphone →
+        /// Mic boost: Auto by default). Built-in speech then skips its own lighter gain.
+        /// </summary>
+        private Action<byte[]> OfflineFeed(IOfflineEngine engine)
+        {
+            var agc = MicBoostSetting.Create(AppStorage.LoadMicBoost());
+            int n = _sessionNumber;
+            agc.PerSecond = line => DiagLog.Add("agc", "s" + n + " " + line);
+            _agc = agc;
+            if (engine is BuiltInEngine b) b.OwnGain = agc.Mode == MicBoostMode.Off;
+            return pcm => { var o = agc.Process(pcm); LastSessionAudio.Add(o); engine.Feed(o); };
+        }
+
         private void StartRecording(string trigger = "other")
         {
             RecordingStarts++;
@@ -326,6 +349,7 @@ namespace Rapcha.Win
             _vocab = vocab;
             int gen = ++_generation;
             int number = ++_sessionNumber;
+            _agc = null;
             LiveSession session = null;
             IOfflineEngine offline = null;
             DictationRouter router;
@@ -351,10 +375,10 @@ namespace Rapcha.Win
             }
             else
             {
-                // v18: built-in Windows speech listens to the Windows default microphone itself (as Microsoft's apps
-                // feed it) unless you picked another microphone in Settings.
-                bool ownMic = AppStorage.LoadMicDevice().Length == 0;
-                offline = OfflineEngines.Start(choice, vocab, out note, ownMic);
+                // v20: one microphone stream only. Built-in speech no longer opens the microphone itself (v18-v19 did, so
+                // the mic was opened twice and Windows speech heard the quiet, unboosted microphone); it gets Rapcha's
+                // stream after the automatic mic boost, like Whisper.
+                offline = OfflineEngines.Start(choice, vocab, out note);
                 if (offline == null)
                 {
                     AppStorage.Log("[s" + number + "] offline engine could not start");
@@ -363,13 +387,14 @@ namespace Rapcha.Win
                     _main?.Settings.ResumeMeter();
                     return;
                 }
-                router = DictationRouter.Offline(offline.Feed);
+                router = DictationRouter.Offline(OfflineFeed(offline));
                 HookOffline(offline, gen);
             }
 
             LastSessionAudio.Clear();
+            _micOpensAtStart = MicTracker.Opens;
             var recorder = new WaveInRecorder(
-                chunk => { LastSessionAudio.Add(chunk); router.Feed(chunk); },
+                chunk => { if (!router.IsOffline) LastSessionAudio.Add(chunk); router.Feed(chunk); },   // offline: saved after the boost
                 level => _ring.Level = level, "voice typing", true);
             int device = WaveInRecorder.ResolveDevice(AppStorage.LoadMicDevice());
             var problem = recorder.Start(device, out var detail);
@@ -409,7 +434,7 @@ namespace Rapcha.Win
             AppStorage.Log("[s" + number + "] engine=" + _engine + " tier=" + DeviceTiers.Name(DeviceProbe.Tier) + " max_s=" + _maxSeconds + (online ? "" : " (offline at start)"));
             LastEngineWhy = _engine + " - " + (offline != null && choice.Engine != _engine ? "Whisper could not start, used built-in; " : "") + EngineWhy(online, choice);
             DiagLog.Add("session", "SESSION " + number + " START trigger=" + trigger + " engine=" + LastEngineWhy + " device " + recorder.FormatForLog +
-                        " attempts=[" + recorder.OpenAttempts + "] max_s=" + _maxSeconds + (offline is BuiltInEngine b && b.OwnMicrophone ? " (built-in listens to the Windows default mic itself; Rapcha's recorder also runs)" : ""));
+                        " attempts=[" + recorder.OpenAttempts + "] max_s=" + _maxSeconds + (_agc != null ? " mic_boost=" + _agc.Mode : ""));
             if (note.Length > 0) ShowLabel(note, 6000, true);
             if (session != null)
             {
@@ -461,7 +486,7 @@ namespace Rapcha.Win
             string captured = session?.Turn.LastInterimText ?? "";
             HookOffline(engine, gen);
             _offline = engine;
-            _router.SwitchToOffline(engine.Feed, captured);
+            _router.SwitchToOffline(OfflineFeed(engine), captured);
             _engine = engine.Kind;
             _session = null;
             Task.Run(() => { try { session?.Dispose(); } catch { } });
@@ -576,12 +601,15 @@ namespace Rapcha.Win
                 offline?.Dispose();   // Whisper frees its model here
             }
             text = (text ?? "").Trim();
+            LastSessionMicOpens = MicTracker.Opens - _micOpensAtStart;
+            LastResultForTest = text;
             string endReason = stopNote == Messages.TimeLimit ? "time limit" : stopNote == Messages.LowMemory ? "low memory on the PC" : stopNote == Messages.RapchaMemory ? "Rapcha memory limit" :
                                stopNote != null ? "stopped by Rapcha" : automatic ? "stopped by the online service (goAway)" : "you stopped it (tap, shortcut or Done)";
             DiagLog.Add("session", "SESSION " + number + " END reason=" + endReason + " seconds=" + (DateTime.UtcNow - _startedAt).TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) +
                         " engine=" + (offline?.Kind ?? SpeechEngine.Gemini) + " result_words=" + TextStats.WordCount(text) + " bytes_captured=" + recorder.BytesCaptured +
                         " lost_ms=" + (int)recorder.FinalLostMs + " queue_full=" + recorder.QueueFull + " resampler_in=" + recorder.ResamplerIn + " out=" + recorder.ResamplerOut +
-                        " peak=" + recorder.MaxPeak + (offline != null ? " offline " + offline.Summary : ""));
+                        " peak=" + recorder.MaxPeak + " mic_opens_this_session=" + (MicTracker.Opens - _micOpensAtStart) +
+                        (offline != null ? " offline " + offline.Summary + (_agc != null ? " " + _agc.Summary : "") : ""));
             DiagLog.Words("session " + number + " final", text);
             if (offline != null)
                 AppStorage.Log("[s" + number + "] summary: offline " + offline.Summary + " captured_chars=" + (router?.Captured.Length ?? 0) +
@@ -770,6 +798,8 @@ namespace Rapcha.Win
         /// <summary>v18 self-test: Rapcha stops the dictation by itself, as the memory guard or time limit would.</summary>
         internal Task AutoStopForTest() => FinishAsync(Messages.TimeLimit);
         internal void CancelForTest() => Cancel(null);
+        internal void StartForTest() => StartRecording("self-test");
+        internal Task FinishForTest() => FinishAsync();
         internal void ExitForTest() => ExitApp();
         internal string TrayText => _tray.Text;
         internal RingWindow Ring => _ring;

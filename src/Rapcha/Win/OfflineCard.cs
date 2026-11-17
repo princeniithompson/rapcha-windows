@@ -204,6 +204,7 @@ namespace Rapcha.Win
             var st = WhisperNative.Status;
             if (WhisperNative.SimulateBlocked || st == WhisperNative.State.Blocked) return WhisperNative.BlockedMessage;
             if (!WhisperNative.IsBundled || st == WhisperNative.State.NotBundled) return "Downloaded, but this copy of Rapcha has no Whisper engine inside; built-in Windows speech is used.";
+            if (st == WhisperNative.State.CpuUnsupported || CpuFeatures.Choose(CpuProbe.Features) == WhisperBuild.None) return WhisperNative.CpuMessage;
             if (st == WhisperNative.State.Failed) return "Downloaded, but Whisper couldn't start on this laptop; built-in Windows speech is used.";
             return "Ready: " + m.Label + ". Used when you're offline; it loads only while you talk and is freed right after.";
         }

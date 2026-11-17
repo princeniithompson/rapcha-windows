@@ -1,4 +1,5 @@
 using System;
+using Rapcha.Core;
 using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
@@ -16,7 +17,7 @@ namespace Rapcha.Win
     /// </summary>
     public static class WhisperNative
     {
-        public enum State { NotTried, Ready, NotBundled, Blocked, Failed }
+        public enum State { NotTried, Ready, NotBundled, Blocked, Failed, CpuUnsupported }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
         [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] private static extern IntPtr GetProcAddress(IntPtr module, string name);
@@ -52,6 +53,15 @@ namespace Rapcha.Win
             err == ERROR_INVALID_IMAGE_HASH || err == ERROR_ACCESS_DISABLED_BY_POLICY || err == ERROR_SYSTEM_INTEGRITY_POLICY || err == ERROR_DRIVER_BLOCKED ||
             err == 4552 /* ERROR_SYSTEM_INTEGRITY_ROLLBACK_DETECTED */ || err == 4553 /* POLICY_SIGNATURE */ || err == 4556 /* INVALID_POLICY */;
 
+        /// <summary>v20: self-test only: load this build ("sse" or "avx2") whatever the processor says.</summary>
+        public static string ForceVariant;
+        public static string CpuMessage => "This processor can't run Whisper (it needs SSE2, SSE3 and SSSE3), so built-in Windows speech is used.";
+
+        /// <summary>v20: what was compiled into each embedded build (for Diagnostics). Both are 32-bit, static, no OpenMP, no GPU.</summary>
+        public static string BuildFlags(string variant) => variant == "avx2"
+            ? "avx2 build: /arch:AVX2 with AVX, AVX2, FMA, F16C (only loaded when the processor has all of them)"
+            : "sse build: /arch:SSE2 plus SSE3/SSSE3 code paths; no AVX, AVX2, FMA, F16C, BMI2 or AVX-512 anywhere (GGML_NATIVE=OFF)";
+
         public static string BlockedMessage => "Whisper can't run in Windows S mode; using built-in Windows speech.";
 
         /// <summary>The resource name for this CPU, or null when this build has no engine inside.</summary>
@@ -72,13 +82,21 @@ namespace Rapcha.Win
             {
                 if (SimulateBlocked) { LastError = ERROR_INVALID_IMAGE_HASH; AppStorage.Log("Whisper engine: load refused (simulated S mode)"); return State.Blocked; }
                 if (Status == State.Ready) return Status;
-                if (Status == State.Blocked || Status == State.NotBundled) return Status;
+                if (Status == State.Blocked || Status == State.NotBundled || Status == State.CpuUnsupported) return Status;
                 try
                 {
-                    var facts = DeviceProbe.Measure();
-                    bool avx2 = facts.Avx2;
-                    var res = ResourceFor(avx2) ?? ResourceFor(false);
-                    if (res == null) { Status = State.NotBundled; AppStorage.Log("Whisper engine: not in this build"); return Status; }
+                    // v20: check the processor before any Whisper code is loaded (an instruction it lacks would crash Rapcha).
+                    var cpu = CpuProbe.Features;
+                    var build = CpuFeatures.Choose(cpu);
+                    if (ForceVariant == "sse") build = WhisperBuild.Sse; else if (ForceVariant == "avx2") build = WhisperBuild.Avx2;
+                    if (build == WhisperBuild.None)
+                    {
+                        Status = State.CpuUnsupported;
+                        AppStorage.Log("Whisper engine: not loaded, processor lacks SSSE3 (" + cpu + ")");
+                        return Status;
+                    }
+                    var res = build == WhisperBuild.Avx2 ? ResourceFor(true) : ResourceFor(false);
+                    if (res == null) { Status = State.NotBundled; AppStorage.Log("Whisper engine: not in this build (" + build + ")"); return Status; }
                     Variant = res.Contains("avx2") ? "avx2" : "sse";
                     byte[] dll;
                     using (var s = typeof(WhisperNative).Assembly.GetManifestResourceStream(res))
@@ -112,7 +130,7 @@ namespace Rapcha.Win
                         return Status;
                     }
                     Status = State.Ready;
-                    AppStorage.Log("Whisper engine: loaded variant=" + Variant + " in " + sw.ElapsedMilliseconds + " ms");
+                    AppStorage.Log("Whisper engine: loaded variant=" + Variant + " in " + sw.ElapsedMilliseconds + " ms (" + (IntPtr.Size == 4 ? "32" : "64") + "-bit; cpu " + cpu + (ForceVariant != null ? "; forced for a test" : "") + ")");
                     return Status;
                 }
                 catch (Exception e)

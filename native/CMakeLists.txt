@@ -1,6 +1,10 @@
 # One self-contained rapcha-whisper.dll: whisper.cpp + ggml linked in statically, static C runtime, no OpenMP,
 # no GPU. Built for 32-bit Windows (Rapcha.exe is a 32-bit .NET 4.8 app) in two CPU levels by the release workflow:
 #   cmake -S native -B build -A Win32 -DWHISPER_DIR=<whisper.cpp v1.9.5> -DRAPCHA_AVX2=ON|OFF
+# v20: the SSE build (RAPCHA_AVX2=OFF) is for processors without AVX such as the Celeron N3350: compiled with MSVC's
+# default /arch:SSE2 (no /arch:SSE4.2 or AVX flag), with ggml's SSE3/SSSE3 code paths switched on by hand (MSVC never
+# defines __SSE3__/__SSSE3__ itself). No AVX, AVX2, FMA, F16C, BMI2 or AVX-512 code. CI checks this with an
+# instruction scan and by running it under Intel SDE emulating a Goldmont (N3350) processor.
 cmake_minimum_required(VERSION 3.20)
 cmake_policy(SET CMP0091 NEW)
 project(rapcha_whisper C CXX)
@@ -21,6 +25,7 @@ if (RAPCHA_AVX2)
   set(GGML_FMA ON CACHE BOOL "" FORCE)
   set(GGML_F16C ON CACHE BOOL "" FORCE)
 else()
+  set(GGML_SSE42 OFF CACHE BOOL "" FORCE)
   set(GGML_AVX OFF CACHE BOOL "" FORCE)
   set(GGML_AVX2 OFF CACHE BOOL "" FORCE)
   set(GGML_FMA OFF CACHE BOOL "" FORCE)
@@ -31,6 +36,9 @@ set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
 set(GGML_BMI2 OFF CACHE BOOL "" FORCE)
 file(TO_CMAKE_PATH "${WHISPER_DIR}" WHISPER_SRC)
 add_subdirectory("${WHISPER_SRC}" whisper EXCLUDE_FROM_ALL)
+if (NOT RAPCHA_AVX2 AND MSVC)
+  target_compile_definitions(ggml-cpu PRIVATE __SSE3__ __SSSE3__)
+endif()
 add_library(rapcha_whisper SHARED rapcha_whisper.cpp)
 set_target_properties(rapcha_whisper PROPERTIES OUTPUT_NAME "rapcha-whisper" PREFIX "")
 target_link_libraries(rapcha_whisper PRIVATE whisper)

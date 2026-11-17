@@ -222,9 +222,66 @@ namespace Rapcha.Win
             }
         }
 
+        /// <summary>
+        /// v20 self-test only: a pretend microphone for voice typing (the CI machine has none). Start() then behaves as if
+        /// waveIn had opened this device: the mic counts as open, driver-format buffers arrive every 50 ms in real time
+        /// (the audio, then silence), and they go through exactly the same conversion as a real microphone.
+        /// </summary>
+        public sealed class FakeDevice { public byte[] Native; public int Rate, Channels; public SampleKind Kind; public string Name; }
+        public static FakeDevice Simulated;
+
+        private MicProblem StartFake(FakeDevice f, out string detail)
+        {
+            detail = "";
+            DeviceName = f.Name;
+            OpenAttempts = "simulated device";
+            _event = new AutoResetEvent(false);
+            Prepare(-3, f.Rate, f.Channels, f.Kind);
+            _micId = MicTracker.Opened(Owner, "simulated device " + FormatForLog);
+            if (Owner == "voice typing") LastOpen = DateTime.Now.ToString("HH:mm:ss") + " simulated device " + FormatForLog;
+            _thread = new Thread(() => FakeLoop(f)) { IsBackground = true, Name = "Rapcha fake mic" };
+            _thread.Start();
+            return MicProblem.None;
+        }
+
+        private void FakeLoop(FakeDevice f)
+        {
+            int step = _bufferBytes;
+            var started = DateTime.UtcNow;
+            long sent = 0;
+            var silence = new byte[step];
+            try
+            {
+                while (true)
+                {
+                    _event.WaitOne(10);
+                    if (DateTime.UtcNow.Ticks >= Interlocked.Read(ref _stopAtTicks)) { if (!_hardStop) _rechunker.FlushTail(); break; }
+                    // deliver every buffer that is due by now (real time)
+                    while ((sent + step) * 1000.0 / _bytesPerSecond <= (DateTime.UtcNow - started).TotalMilliseconds)
+                    {
+                        byte[] b;
+                        if (sent < f.Native.Length) { int n = (int)Math.Min(step, f.Native.Length - sent); b = new byte[step]; Buffer.BlockCopy(f.Native, (int)sent, b, 0, n); }
+                        else b = silence;
+                        sent += step;
+                        BuffersReturned++;
+                        Convert(b, step);
+                    }
+                }
+            }
+            catch (Exception) { }
+            finally
+            {
+                FinalLostMs = LostMs;
+                Cleanup();
+                try { _onLevel?.Invoke(0f); } catch { }
+            }
+        }
+
         public MicProblem Start(int deviceId, out string detail)
         {
             detail = "";
+            var fake = Simulated;
+            if (fake != null && Owner == "voice typing") return StartFake(fake, out detail);
             if (IsMicPrivacyDenied()) { detail = "privacy setting is Deny"; DiagLog.Warn("mic open refused for " + Owner + ": Windows microphone privacy setting is Deny"); return MicProblem.PrivacyBlocked; }
             int count = waveInGetNumDevs();
             if (count == 0) { detail = "waveInGetNumDevs=0"; DiagLog.Warn("mic open failed for " + Owner + ": no capture devices (waveInGetNumDevs=0)"); return MicProblem.NoMicrophone; }

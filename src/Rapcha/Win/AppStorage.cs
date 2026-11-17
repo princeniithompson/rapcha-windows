@@ -44,6 +44,20 @@ namespace Rapcha.Win
             try { WriteAtomic(MicPath, new UTF8Encoding(false).GetBytes((name ?? "").Trim())); } catch { }
         }
 
+        private static string BoostPath => Path.Combine(Folder, "mic-boost.txt");
+
+        /// <summary>v20: Settings → Microphone → Mic boost for offline typing: "auto" (default), "off" or a number of dB.</summary>
+        public static string LoadMicBoost()
+        {
+            try { return File.Exists(BoostPath) ? File.ReadAllText(BoostPath, Encoding.UTF8).Trim() : "auto"; }
+            catch { return "auto"; }
+        }
+
+        public static void SaveMicBoost(string value)
+        {
+            try { WriteAtomic(BoostPath, new UTF8Encoding(false).GetBytes((value ?? "auto").Trim())); } catch { }
+        }
+
         /// <summary>The last part of the log, for the Copy log button.</summary>
         public static string ReadLogTail(int maxLines = 400)
         {
