@@ -399,7 +399,10 @@ namespace Rapcha.Win
             _pieces++;
             var segs = WhisperNative.LastSegments();
             string segText = segs == null ? "segments=n/a" : "segments=" + segs.Length + (segs.Length == 0 ? "" : " [" + string.Join(" | ", segs.Select(g => string.Format(CultureInfo.InvariantCulture,
-                "{0:0.00}-{1:0.00}s no_speech={2:0.00} avg_logprob={3:0.00} tokens={4}{5}", g.T0 / 100, g.T1 / 100, g.NoSpeech, g.AvgLogProb, g.Tokens, g.Kept ? "" : " DROPPED(no_speech)"))) + "]");
+                "{0}no_speech={1:0.00} avg_logprob={2:0.00} tokens={3}{4}",
+                // Rapcha runs Whisper without timestamps, so segment times are only shown when they make sense
+                g.T0 >= 0 && g.T1 > g.T0 && g.T1 < 360000 ? (g.T0 / 100).ToString("0.00", CultureInfo.InvariantCulture) + "-" + (g.T1 / 100).ToString("0.00", CultureInfo.InvariantCulture) + "s " : "",
+                g.NoSpeech, g.AvgLogProb, g.Tokens, g.Kept ? "" : " DROPPED(no_speech)"))) + "]");
             bool invention = WhisperText.IsLikelyInvention(text, vad.SpeechSeconds);
             string head = where + ": " + astats + " vad_speech_s=" + vad.SpeechSeconds.ToString("0.00", CultureInfo.InvariantCulture) + " sent_samples=" + speech.Length + " (trimmed " + trimmed +
                           ") gain=" + gain.ToString("0.0", CultureInfo.InvariantCulture) + " transcribe_ms=" + sw.ElapsedMilliseconds + " words=" + TextStats.WordCount(text) +
