@@ -59,6 +59,85 @@ jobs:
             "{0}: dll {1:N0} bytes, embedded gz {2:N0} bytes" -f $v.n, $dll.Length, (Get-Item $out).Length
           }
 
+      - name: Whisper CPU safety (no AVX in the SSE build - xed instruction scan, Intel SDE emulating a Goldmont / Celeron N3350, speed)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'; $ProgressPreference = 'SilentlyContinue'
+          $t = Join-Path $env:RUNNER_TEMP "cpu-safety"; New-Item -ItemType Directory -Force $t | Out-Null
+          $summary = New-Object System.Collections.Generic.List[string]
+          foreach ($v in 'sse', 'avx2') {
+            $in = [IO.File]::OpenRead((Resolve-Path "src/Rapcha/Assets/engine/rapcha-whisper-$v.dll.gz").Path)
+            $gz = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+            $fs = [IO.File]::Create((Join-Path $t "rapcha-whisper-$v.dll")); $gz.CopyTo($fs); $fs.Dispose(); $gz.Dispose(); $in.Dispose()
+          }
+          # Intel SDE 10.13.1 (Windows), pinned copy, checked against Intel's published SHA-256
+          $sdeTar = Join-Path $t "sde.tar.xz"
+          Invoke-WebRequest "https://media.githubusercontent.com/media/petarpetrovt/setup-sde/6d2773b/binaries/sde-external-10.13.1-2026-07-28-win.tar.xz" -OutFile $sdeTar
+          $h = (Get-FileHash $sdeTar -Algorithm SHA256).Hash
+          if ($h -ne '74E626EDE09B0BAA5011FC9E51B58627EA92C3FC0BAE5FD7DB34B490F335F651') { throw "SDE checksum mismatch $h" }
+          & 7z x $sdeTar "-o$t" -y | Out-Null; & 7z x (Join-Path $t "sde.tar") "-o$t" -y | Out-Null
+          $sde = (Get-ChildItem $t -Recurse -Filter sde.exe | Select-Object -First 1).FullName
+          $xed = Join-Path (Split-Path $sde) "xed.exe"
+          "SDE: $sde"
+          # 1) static scan of every instruction in each DLL
+          foreach ($v in 'sse', 'avx2') {
+            $dll = Join-Path $t "rapcha-whisper-$v.dll"
+            $scan = & $xed -i $dll -chip-check GOLDMONT 2>&1 | Out-String
+            $bad = ([regex]::Matches($scan, '(?im)^.*(INVALID|not valid).*$')).Count
+            $hist = & $xed -i $dll -isa-set 2>&1 | Out-String
+            $avxLines = ([regex]::Matches($hist, '(?im)^.*\b(AVX|AVX2|FMA|F16C|BMI2|AVX512)\w*\b.*$')) | ForEach-Object { $_.Value.Trim() }
+            "== xed $v : lines flagged not valid for GOLDMONT: $bad"
+            ($scan -split "`n" | Select-Object -Last 15) -join "`n"
+            "== xed $v : AVX-family ISA sets seen:"; $avxLines | Select-Object -First 25
+            $summary.Add("xed static scan, $v build: $bad instruction lines flagged as not valid for Goldmont; AVX-family ISA-set lines: $(@($avxLines).Count)")
+          }
+          # 2) the bench program and model
+          cmake -S native/bench -B (Join-Path $t "bench") -A Win32 | Out-Null
+          cmake --build (Join-Path $t "bench") --config Release | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "rw_bench build failed" }
+          $bench = (Get-ChildItem (Join-Path $t "bench") -Recurse -Filter rw_bench.exe | Select-Object -First 1).FullName
+          $model = Join-Path $t "ggml-tiny.en.bin"
+          Invoke-WebRequest "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin" -OutFile $model
+          $mh = (Get-FileHash $model -Algorithm SHA256).Hash.ToLower()
+          if ($mh -ne '921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f') { throw "tiny.en checksum mismatch $mh" }
+          Add-Type -AssemblyName System.Speech
+          $wav = Join-Path $t "speech16k.wav"
+          $syn = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+          $syn.SetOutputToWaveFile($wav, $fmt)
+          $syn.Speak("The boy is coming. He is coming home from school today. We will meet at the market on Saturday morning.")
+          $syn.SetOutputToNull(); $syn.Dispose()
+          # 3) native speed on this runner
+          foreach ($run in @(@('sse', 2), @('sse', 1), @('avx2', 2))) {
+            $o = & $bench (Join-Path $t "rapcha-whisper-$($run[0]).dll") $model $wav $run[1] 2>&1 | Out-String
+            "== native $($run[0]) threads=$($run[1])"; $o
+            $m = [regex]::Match($o, 'transcribe_ms=(\d+) audio_s=([\d.]+) rtf=([\d.]+)')
+            $summary.Add("native on the runner, $($run[0]) build, $($run[1]) thread(s): " + $m.Value + " text: " + ([regex]::Match($o, 'text: (.*)').Groups[1].Value.Trim()))
+          }
+          # 4) the SSE build under Intel SDE pretending to be a Goldmont CPU (Celeron N3350 family): any AVX/AVX2/FMA/F16C/BMI2 instruction is reported
+          function Run-Sde($v, $chk) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $o = & $sde -glm -chip_check_die 0 -chip_check_emit_file 1 -chip_check_file $chk -- $bench (Join-Path $t "rapcha-whisper-$v.dll") $model $wav 2 2>&1 | Out-String
+            $code = $LASTEXITCODE; $sw.Stop()
+            $file = if (Test-Path $chk) { Get-Content $chk -Raw } else { "" }
+            $hits = ([regex]::Matches($o + "`n" + $file, '(?i)not valid for specified chip')).Count
+            Write-Host "== SDE -glm $v : exit $code, $hits chip-check reports, $([int]$sw.Elapsed.TotalSeconds) s"; Write-Host $o; Write-Host (($file -split "`n" | Select-Object -First 20) -join "`n")
+            return ,@($code, $hits, $o)
+          }
+          $r = Run-Sde 'sse' (Join-Path $t "chk-sse.txt")
+          $okText = [regex]::Match($r[2], 'text: (.*)').Groups[1].Value.Trim()
+          $summary.Add("Intel SDE emulating Goldmont (-glm), SSE build: exit $($r[0]), instructions not valid for Goldmont: $($r[1]), text: $okText")
+          $n = Run-Sde 'avx2' (Join-Path $t "chk-avx2.txt")
+          $summary.Add("Negative control - AVX2 build under the same Goldmont emulation: instructions not valid for Goldmont: $($n[1]) (must be more than 0)")
+          "## Whisper CPU safety (Celeron N3350 = Goldmont, no AVX)" >> $env:GITHUB_STEP_SUMMARY
+          $summary | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY
+          $summary | Set-Content (Join-Path $t "cpu-safety.txt")
+          New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "rapcha-shots\v20") | Out-Null
+          Copy-Item (Join-Path $t "cpu-safety.txt") (Join-Path $env:RUNNER_TEMP "rapcha-shots\v20\cpu-safety.txt")
+          $summary
+          if ($r[0] -ne 0 -or $r[1] -ne 0 -or $okText.Length -lt 20) { throw "SSE Whisper build is NOT safe on Goldmont" }
+          if ($n[1] -le 0) { throw "negative control did not detect AVX2 - the SDE check is not working" }
+
       - name: Build Rapcha.exe
         run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
 
@@ -293,6 +372,25 @@ jobs:
           "v19 self-test exit code: $code (0 ok, 121 snooze, 122 Whisper numbers, 123 words opt-in, 124 microphone left open, 125 page / file)"
           "## v19 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
           if ($code -ne 0) { throw "v19 self-test failed ($code)" }
+
+      - name: v20 self-test (quiet -30 dBFS microphone through one microphone open and the automatic mic boost into built-in speech and Whisper Tiny's no-AVX build on a pretend 4 GB / 2-core laptop, CPU guard, Diagnostics CPU features, Settings mic boost)
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "src/Rapcha/bin/Release/Rapcha.exe").Path
+          $log = Join-Path $env:APPDATA "Rapcha\rapcha.log"
+          $shots = Join-Path $env:RUNNER_TEMP "rapcha-shots\v20"
+          $p = Start-Process -FilePath $exe -ArgumentList ('--selftest-v20 "' + $shots + '"') -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(900000)) { Stop-Process -Id $p.Id -Force; throw "v20 self-test hung" }
+          $code = $p.ExitCode
+          Get-Process Rapcha -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path $log) { Get-Content $log | Select-String -Pattern "Selftest v20|Whisper|Offline|summary|Unhandled|Exception| at " | Select-Object -Last 120 }
+          Get-ChildItem $shots -ErrorAction SilentlyContinue | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
+          $res = Join-Path $shots "v20-results.txt"
+          if (Test-Path $res) { Get-Content $res; "## v20 quiet microphone, mic boost, one microphone open, Whisper no-AVX" >> $env:GITHUB_STEP_SUMMARY; Get-Content $res | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY }
+          "v20 self-test exit code: $code (0 ok, 131 built-in, 132 Whisper, 133 microphone opened more than once, 134 boost lines, 135 page / diagnostics)"
+          "## v20 self-test: exit $code" >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { throw "v20 self-test failed ($code)" }
 
       - name: Upload main window screenshots
         if: always()
