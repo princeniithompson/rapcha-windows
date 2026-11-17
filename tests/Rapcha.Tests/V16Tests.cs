@@ -78,9 +78,10 @@ namespace Rapcha.Tests
         {
             Assert.False(SessionCaps.ShouldStop(119.5, 120, SpeechEngine.Whisper, 2000, out _));
             Assert.True(SessionCaps.ShouldStop(120, 120, SpeechEngine.Whisper, 2000, out var r1)); Assert.Equal("time_limit", r1);
-            Assert.True(SessionCaps.ShouldStop(10, 120, SpeechEngine.Whisper, 250, out var r2)); Assert.Equal("low_memory", r2);
+            // v18: Windows' free memory no longer stops a dictation here (MemoryGuard watches Rapcha's own memory)
+            Assert.False(SessionCaps.ShouldStop(10, 120, SpeechEngine.Whisper, 250, out _));
             Assert.False(SessionCaps.ShouldStop(10, 300, SpeechEngine.BuiltIn, 250, out _));
-            Assert.True(SessionCaps.ShouldStop(10, 300, SpeechEngine.BuiltIn, 150, out _));
+            Assert.False(SessionCaps.ShouldStop(10, 300, SpeechEngine.BuiltIn, 150, out _));
             Assert.False(SessionCaps.ShouldStop(10, 570, SpeechEngine.Gemini, 50, out _));   // online doesn't hold audio
         }
 

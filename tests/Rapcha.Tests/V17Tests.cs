@@ -249,8 +249,12 @@ namespace Rapcha.Tests
         {
             Assert.Equal(120, SessionCaps.MaxSeconds(SpeechEngine.Whisper, DeviceTier.Low));
             Assert.Equal(300, SessionCaps.MaxSeconds(SpeechEngine.BuiltIn, DeviceTier.Low));
-            Assert.True(SessionCaps.ShouldStop(30, 120, SpeechEngine.Whisper, 250, out var why));
-            Assert.Equal("low_memory", why);
+            // v18: the free-memory guard is now MemoryGuard (Rapcha's own memory; Windows' only under 100 MB for 5 s)
+            Assert.False(SessionCaps.ShouldStop(30, 120, SpeechEngine.Whisper, 250, out _));
+            var g = new MemoryGuard();
+            Assert.False(g.ShouldStop(30, SpeechEngine.Whisper, 500, 90, 0, out _));
+            Assert.True(g.ShouldStop(36, SpeechEngine.Whisper, 500, 90, 0, out var why));
+            Assert.Equal("system_memory_floor", why);
         }
 
         [Fact]

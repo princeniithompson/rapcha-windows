@@ -62,12 +62,21 @@ RW_API int rw_transcribe(void * ctx, const float * samples, int n, int threads, 
     p.translate = false;
     p.no_context = true;
     p.no_timestamps = true;
-    p.single_segment = false;
+    // v18 anti-invention settings: one segment for short dictations, no special or non-speech tokens, greedy
+    // decoding at temperature 0 with OpenAI's fallback (0.2 steps) when the text repeats (entropy) or is unsure
+    // (log-probability), and the no-speech threshold so silence gives no text.
+    p.single_segment = n < 16000 * 15;
     p.print_special = false;
     p.print_progress = false;
     p.print_realtime = false;
     p.print_timestamps = false;
     p.suppress_blank = true;
+    p.suppress_nst = true;
+    p.temperature = 0.0f;
+    p.temperature_inc = 0.2f;
+    p.entropy_thold = 2.4f;
+    p.logprob_thold = -1.0f;
+    p.no_speech_thold = 0.6f;
     p.language = (lang && *lang) ? lang : "en";
     p.initial_prompt = (prompt && *prompt) ? prompt : nullptr;
     if (whisper_full((whisper_context *) ctx, p, samples, n) != 0) return -2;
@@ -75,6 +84,8 @@ RW_API int rw_transcribe(void * ctx, const float * samples, int n, int threads, 
     const int segs = whisper_full_n_segments((whisper_context *) ctx);
     for (int i = 0; i < segs; ++i)
     {
+        // a segment Whisper itself thinks is not speech is dropped (it is where "thanks for watching" comes from)
+        if (whisper_full_get_segment_no_speech_prob((whisper_context *) ctx, i) > 0.85f) continue;
         const char * t = whisper_full_get_segment_text((whisper_context *) ctx, i);
         if (t) text += t;
     }

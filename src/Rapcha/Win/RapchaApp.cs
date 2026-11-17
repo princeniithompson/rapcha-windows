@@ -36,6 +36,12 @@ namespace Rapcha.Win
         private SpeechEngine _engine = SpeechEngine.Gemini;
         private int _maxSeconds = SessionCaps.GeminiSeconds;
         private DateTime _lastMemCheck;
+        // v18: Rapcha's own memory (not Windows' free memory) decides an early stop; a stop never restarts by itself.
+        private MemoryGuard _memGuard = new MemoryGuard();
+        private readonly StartGate _startGate = new StartGate();
+        private readonly System.Diagnostics.Process _self = System.Diagnostics.Process.GetCurrentProcess();
+        internal StartGate Gate => _startGate;
+        internal int StartsIgnored => _startGate.Ignored;
         private string _offlinePreview = "";
         private System.Collections.Generic.List<string> _vocab = new System.Collections.Generic.List<string>();
         private IntPtr _target;
@@ -68,7 +74,7 @@ namespace Rapcha.Win
         private const string TrayIdle = "Rapcha - click the ring to talk";
 
         /// <param name="showMain">A manual launch (double-click, shortcut): show the main window. Autostart stays quiet.</param>
-        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null)
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null, string selfTestV18 = null)
         {
             _selfTestOcr = selfTestOcr;
             _selfTestRing = selfTestRing;
@@ -141,7 +147,7 @@ namespace Rapcha.Win
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
-            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
+            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null || selfTestV18 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
             else if (Snooze.Active) { AppStorage.Log("Snooze: still on after a restart (" + Snooze.LeftText + ")"); ApplySnooze(); }
             ShellWindows.Hook();
             ShellWindows.ForegroundChanged += OnForegroundChanged;
@@ -171,6 +177,7 @@ namespace Rapcha.Win
             if (_selfTestOcr != null) { RunOcrSelfTest(); return; }
             if (_selfTestRing) { RunRingSelfTest(); return; }
             if (selfTestV17 != null) { new V17SelfTest(this, selfTestV17).Start(); return; }
+            if (selfTestV18 != null) { new V18SelfTest(this, selfTestV18).Start(); return; }
             if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
         }
 
@@ -204,13 +211,14 @@ namespace Rapcha.Win
             {
                 case ShortcutAction.TapToTalk:
                     if (!down) return;
-                    if (_phase == Phase.Idle) StartRecording();
+                    if (_phase == Phase.Idle) { if (GateAllows("tap shortcut")) StartRecording(); }
                     else if (_phase == Phase.Recording) _ = FinishAsync();
                     break;
                 case ShortcutAction.HoldToTalk:
                     if (down)
                     {
                         if (_phase != Phase.Idle) return;
+                        if (!GateAllows("hold shortcut")) return;
                         StartRecording();
                         _holdSession = _phase == Phase.Recording;
                     }
@@ -251,7 +259,7 @@ namespace Rapcha.Win
             }
             switch (_phase)
             {
-                case Phase.Idle: StartRecording(); break;
+                case Phase.Idle: if (GateAllows("ring tap")) StartRecording(); break;
                 case Phase.Recording: _ = FinishAsync(); break;
             }
         }
@@ -260,6 +268,18 @@ namespace Rapcha.Win
         {
             if (_phase == Phase.Recording) { Cancel("Cancelled"); return; }
             if (_phase == Phase.Idle) _menu.Show(p);
+        }
+
+        /// <summary>
+        /// v18: right after Rapcha stopped a dictation by itself (time limit, memory, connection), a tap or shortcut is
+        /// almost always the user's own "stop" arriving late: it must not open a new dictation.
+        /// </summary>
+        private bool GateAllows(string source)
+        {
+            if (_startGate.Allow(DateTime.UtcNow)) return true;
+            AppStorage.Log("Start ignored: " + source + " right after the dictation " + (_startGate.LastWasAutomatic ? "stopped by itself" : "stopped"));
+            if (_startGate.LastWasAutomatic) ShowLabel(Messages.JustStopped, 2500);
+            return false;
         }
 
         private void StartRecording()
@@ -311,13 +331,16 @@ namespace Rapcha.Win
                 };
                 session.GoAway += () =>
                 {
-                    try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording && _session == s) { AppStorage.Log("[s" + number + "] finishing early: Gemini goAway"); _ = FinishAsync(); } })); } catch { }
+                    try { _ring.BeginInvoke(new Action(() => { if (gen == _generation && _phase == Phase.Recording && _session == s) { AppStorage.Log("[s" + number + "] finishing early: Gemini goAway"); _ = FinishAsync(automatic: true); } })); } catch { }
                 };
                 router = new DictationRouter(chunk => s.SendAudio(chunk));
             }
             else
             {
-                offline = OfflineEngines.Start(choice, vocab, out note);
+                // v18: built-in Windows speech listens to the Windows default microphone itself (as Microsoft's apps
+                // feed it) unless you picked another microphone in Settings.
+                bool ownMic = AppStorage.LoadMicDevice().Length == 0;
+                offline = OfflineEngines.Start(choice, vocab, out note, ownMic);
                 if (offline == null)
                 {
                     AppStorage.Log("[s" + number + "] offline engine could not start");
@@ -335,7 +358,7 @@ namespace Rapcha.Win
                 level => _ring.Level = level);
             int device = WaveInRecorder.ResolveDevice(AppStorage.LoadMicDevice());
             var problem = recorder.Start(device, out var detail);
-            AppStorage.Log("[s" + number + "] start: device=\"" + recorder.DeviceName + "\" format=" + recorder.FormatDescription +
+            AppStorage.Log("[s" + number + "] start: device " + recorder.FormatForLog +
                            " attempts=[" + recorder.OpenAttempts + "] result=" + problem + (detail.Length > 0 ? " " + detail : ""));
             if (problem != MicProblem.None)
             {
@@ -353,6 +376,7 @@ namespace Rapcha.Win
             _maxSeconds = SessionCaps.MaxSeconds(_engine, DeviceProbe.Tier);
             _offlinePreview = "";
             _recorder = recorder;
+            _memGuard = new MemoryGuard();
             _phase = Phase.Recording;
             _startedAt = DateTime.UtcNow;
             _gotPreview = false;
@@ -472,23 +496,33 @@ namespace Rapcha.Win
             }
             _bubble.SetTimer(TimerText.For(elapsed.TotalSeconds, _maxSeconds));
             CheckStartMenu(false);   // backup for a missed foreground event
-            long free = -1;
+            if (SessionCaps.ShouldStop(elapsed.TotalSeconds, _maxSeconds, _engine, -1, out var why))
+            {
+                AppStorage.Log("[s" + _sessionNumber + "] stopping: " + why + " at_s=" + (int)elapsed.TotalSeconds);
+                _ = FinishAsync(Messages.TimeLimit);
+                return;
+            }
             if (_offline != null && (DateTime.UtcNow - _lastMemCheck).TotalMilliseconds >= 1000)
             {
                 _lastMemCheck = DateTime.UtcNow;
-                free = DeviceProbe.FreeRamMb();
-            }
-            if (SessionCaps.ShouldStop(elapsed.TotalSeconds, _maxSeconds, _engine, free, out var why))
-            {
-                AppStorage.Log("[s" + _sessionNumber + "] stopping: " + why + " at_s=" + (int)elapsed.TotalSeconds + (free >= 0 ? " free_mb=" + free : ""));
-                _ = FinishAsync(why == "low_memory" ? Messages.LowMemory : Messages.TimeLimit);
+                long free = DeviceProbe.FreeRamMb();
+                long priv = -1;
+                try { _self.Refresh(); priv = _self.PrivateMemorySize64 / (1024 * 1024); } catch { }
+                long held = -1;
+                try { held = _offline.HeldAudioBytes; } catch { }
+                if (_memGuard.ShouldStop(elapsed.TotalSeconds, _engine, priv, free, held, out var mwhy))
+                {
+                    AppStorage.Log("[s" + _sessionNumber + "] stopping: " + mwhy + " at_s=" + (int)elapsed.TotalSeconds + " private_mb=" + priv + " free_mb=" + free + " held_audio_bytes=" + held);
+                    _ = FinishAsync(mwhy == "system_memory_floor" ? Messages.LowMemory : Messages.RapchaMemory);
+                }
             }
         }
 
-        private async Task FinishAsync(string stopNote = null)
+        private async Task FinishAsync(string stopNote = null, bool automatic = false)
         {
             if (_phase != Phase.Recording) return;
             _phase = Phase.Finishing;
+            _startGate.Stopped(automatic || stopNote != null, DateTime.UtcNow);
             int gen = _generation;
             int number = _sessionNumber;
             _watch.Stop();
@@ -524,7 +558,8 @@ namespace Rapcha.Win
             text = (text ?? "").Trim();
             if (offline != null)
                 AppStorage.Log("[s" + number + "] summary: offline " + offline.Summary + " captured_chars=" + (router?.Captured.Length ?? 0) +
-                               " bytes_captured=" + recorder.BytesCaptured + " result_chars=" + text.Length);
+                               " device " + recorder.FormatForLog + " bytes_captured=" + recorder.BytesCaptured + " lost_ms=" + (int)recorder.FinalLostMs +
+                               " peak=" + recorder.MaxPeak + " result_chars=" + text.Length);
             else LogSessionSummary(number, recorder, session, text);
             if (gen != _generation || _phase != Phase.Finishing) return; // cancelled or failed meanwhile
             var target = IntPtr.Zero;
@@ -568,6 +603,7 @@ namespace Rapcha.Win
             }
             await Task.Delay(result == TextDelivery.Result.Typed ? 1300 : 2000);
             if (gen == _generation && _phase == Phase.Idle) _bubble.Close2();
+            _startGate.BackToIdle(DateTime.UtcNow);
             if (stopNote != null && gen == _generation) ShowLabel(stopNote, 4000);
         }
 
@@ -591,11 +627,11 @@ namespace Rapcha.Win
         {
             var t = s.Turn;
             AppStorage.Log(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "[s{0}] summary: device=\"{1}\" format={2} bytes_captured={3} buffers={4} empty_buffers={5} all_zero={6} " +
+                "[s{0}] summary: device={1} format={2} bytes_captured={3} buffers={4} empty_buffers={5} all_zero={6} " +
                 "chunks_sent={7} rms_mean={8:0} rms_max={9:0} peak={10} max_gain={11:0.00} setup_ms={12} " +
                 "server: interim={13} input={14} model_text={15} output={16} turn_complete={17} finish={18} timed_out={19} near_silent={20} " +
                 "result_chars={21}",
-                number, r.DeviceName, r.FormatDescription, r.BytesCaptured, r.BuffersReturned, r.EmptyBuffers, r.LooksSilentlyBlocked,
+                number, r.DeviceId, r.FormatDescription, r.BytesCaptured, r.BuffersReturned, r.EmptyBuffers, r.LooksSilentlyBlocked,
                 s.ChunksSent, t.RmsMean, t.RmsMax, t.Peak, s.MaxGain, s.SetupMs,
                 t.InterimFrames, t.InputFrames, t.ModelTextFrames, t.OutputFrames, t.TurnCompleteFrames, s.FinishReason, t.TimedOut, t.IsNearSilent,
                 text.Length));
@@ -621,6 +657,7 @@ namespace Rapcha.Win
             if (gen != _generation || _phase == Phase.Idle) return;
             if (_offline != null) return;   // already switched to offline: Gemini's late errors don't matter
             AppStorage.Log("[s" + _sessionNumber + "] session failed: " + err.Kind);
+            _startGate.Stopped(true, DateTime.UtcNow);
             if (err.Kind == LiveErrorKind.NoInternet) Connectivity.MarkOffline();
             if (_phase == Phase.Recording && EnginePolicy.SwitchesOffline(err.Kind) && OfflineSettings.Fallback && TrySwitchToOffline(gen, err.Kind.ToString())) return;
             _generation++;
@@ -640,6 +677,7 @@ namespace Rapcha.Win
             _watch.Stop();
             _hotkeys.Unregister(EscHotkeyId);
             _phase = Phase.Idle;
+            _startGate.BackToIdle(DateTime.UtcNow);
             _session = null;
             _recorder = null;
             _offline = null;
@@ -698,6 +736,10 @@ namespace Rapcha.Win
         internal bool IsRecording => _phase != Phase.Idle;
         internal MainWindow Main => _main;
         internal void SimulateShortcut(ShortcutAction a, bool down) => OnShortcut(a, down);
+        /// <summary>v18 self-test: start-tap as the ring would deliver it (goes through the start gate).</summary>
+        internal void SimulateRingTap() => OnRingClicked();
+        /// <summary>v18 self-test: Rapcha stops the dictation by itself, as the memory guard or time limit would.</summary>
+        internal Task AutoStopForTest() => FinishAsync(Messages.TimeLimit);
         internal void CancelForTest() => Cancel(null);
         internal void ExitForTest() => ExitApp();
         internal string TrayText => _tray.Text;

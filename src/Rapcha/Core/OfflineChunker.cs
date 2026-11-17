@@ -13,19 +13,23 @@ namespace Rapcha.Core
         public const int Rate = 16000;
         private const int FrameSamples = Rate / 50;   // 20 ms
 
-        private readonly int _target, _window;
+        private readonly int _target, _window, _overlap;
         private short[] _buf;
         private int _count;
+        private int _fresh;   // samples not yet in any piece
 
         public int ChunksMade { get; private set; }
         public int BufferedSamples => _count;
         /// <summary>The most audio ever held at once (in samples): stays at about one piece.</summary>
         public int PeakSamples { get; private set; }
 
-        public OfflineChunker(int targetSeconds = SessionCaps.ChunkSeconds, int windowSeconds = 5)
+        /// <param name="overlapMs">v18: each new piece starts with this much of the end of the previous one, so a word cut
+        /// at the join is heard whole once (the repeated words are removed with WhisperText.Dedupe).</param>
+        public OfflineChunker(int targetSeconds = SessionCaps.ChunkSeconds, int windowSeconds = 5, int overlapMs = 0)
         {
             _target = Math.Max(1, targetSeconds) * Rate;
             _window = Math.Min(_target / 2, Math.Max(1, windowSeconds) * Rate);
+            _overlap = Math.Max(0, Math.Min(_target / 4, overlapMs * Rate / 1000));
             _buf = new short[_target + Rate];
         }
 
@@ -41,10 +45,11 @@ namespace Rapcha.Core
             {
                 if (_count == _buf.Length) Array.Resize(ref _buf, _buf.Length + Rate);
                 _buf[_count++] = (short)(pcm[offset + 2 * i] | (pcm[offset + 2 * i + 1] << 8));
+                _fresh++;
                 if (_count >= _target)
                 {
                     PeakSamples = Math.Max(PeakSamples, _count);
-                    done.Add(Cut(QuietestCut()));
+                    done.Add(Cut(QuietestCut(), _overlap));
                 }
             }
             PeakSamples = Math.Max(PeakSamples, _count);
@@ -52,7 +57,7 @@ namespace Rapcha.Core
         }
 
         /// <summary>The rest (at the end of the dictation); null when nothing is left.</summary>
-        public short[] Flush() => _count == 0 ? null : Cut(_count);
+        public short[] Flush() => _count == 0 || _fresh == 0 ? null : Cut(_count);
 
         /// <summary>Where to cut: the start of the quietest 20 ms frame in the last window before the target.</summary>
         public int QuietestCut()
@@ -68,13 +73,15 @@ namespace Rapcha.Core
             return best;
         }
 
-        private short[] Cut(int at)
+        private short[] Cut(int at, int overlap = 0)
         {
             at = Math.Max(1, Math.Min(at, _count));
             var piece = new short[at];
             Array.Copy(_buf, piece, at);
-            Array.Copy(_buf, at, _buf, 0, _count - at);
-            _count -= at;
+            int from = Math.Max(0, at - overlap);
+            Array.Copy(_buf, from, _buf, 0, _count - from);
+            _count -= from;
+            _fresh = Math.Max(0, _count - (at - from));
             ChunksMade++;
             return piece;
         }

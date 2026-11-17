@@ -23,7 +23,11 @@ namespace Rapcha.Core
         public const int WhisperLowSeconds = 2 * 60;
         public const int WhisperStrongSeconds = 5 * 60;
         public const int CountdownSeconds = 20;
-        /// <summary>Offline engines stop (keeping the words) when free memory falls below this.</summary>
+        /// <summary>
+        /// Before v18 these were stop thresholds on Windows' free memory and caused false "low on memory" stops on
+        /// 4 GB laptops. Now only MinFreeMbWhisper is used, when choosing the engine at the start (model + 300 MB free);
+        /// during a dictation Core/MemoryGuard watches Rapcha's own memory instead.
+        /// </summary>
         public const long MinFreeMbBuiltIn = 200;
         public const long MinFreeMbWhisper = 300;
         /// <summary>Whisper turns the audio into text about every 30 seconds, so only one piece of audio is held.</summary>
@@ -48,13 +52,14 @@ namespace Rapcha.Core
         /// </summary>
         public static int AfterSwitch(int elapsedSeconds, int newMaxSeconds) => Math.Max(newMaxSeconds, elapsedSeconds + CountdownSeconds);
 
-        /// <summary>Should the dictation stop now? (time used up, or free memory too low for an offline engine)</summary>
+        /// <summary>
+        /// Should the dictation stop now because its time is used up? v18: Windows' free memory no longer stops a
+        /// dictation here (freeRamMb is ignored; see MemoryGuard for Rapcha's own memory and the 100 MB last resort).
+        /// </summary>
         public static bool ShouldStop(double elapsedSeconds, int maxSeconds, SpeechEngine engine, long freeRamMb, out string reason)
         {
             reason = "";
             if (elapsedSeconds >= maxSeconds) { reason = "time_limit"; return true; }
-            long min = MinFreeMb(engine);
-            if (min > 0 && freeRamMb >= 0 && freeRamMb < min) { reason = "low_memory"; return true; }
             return false;
         }
     }

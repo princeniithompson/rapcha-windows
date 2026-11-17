@@ -11,16 +11,20 @@ namespace Rapcha.Win
 
     /// <summary>
     /// Microphone capture with the classic waveIn API (built into Windows, no extra DLL).
-    /// Asks for 16 kHz mono 16-bit; if the driver refuses, falls back to 48k / 44.1k (mono or stereo)
-    /// and resamples to 16 kHz mono. Delivers 100 ms packets in capture order, and on stop keeps
-    /// reading a short tail before flushing the last partial packet.
+    /// Opens WAVE_MAPPER, which is the Windows default recording device (never a loopback / "Stereo Mix" unless
+    /// that is the Windows default). Asks for 16 kHz mono 16-bit, which Windows' audio engine converts to from
+    /// the driver's own format (shared mode); if refused, falls back to 48k / 44.1k (mono or stereo, 16-bit, then
+    /// 32-bit float) and converts to 16 kHz mono itself (Core/PcmResampler). Delivers 100 ms packets in capture
+    /// order, and on stop keeps reading a short tail before flushing the last partial packet.
+    /// v18: 24 buffers of 50 ms (1.2 s) instead of 8 (0.4 s), so a busy 4 GB laptop never drops audio while an
+    /// offline engine loads; dropped audio is measured (LostMs) and logged.
     /// </summary>
     public sealed class WaveInRecorder
     {
         public const int DefaultDevice = -1; // WAVE_MAPPER
         private const int CALLBACK_EVENT = 0x00050000;
         private const int WHDR_DONE = 0x00000001;
-        private const int BufferCount = 8;
+        private const int BufferCount = 24;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct WAVEFORMATEX
@@ -79,11 +83,35 @@ namespace Rapcha.Win
         private long _bytesCaptured;
         private bool _sawNonZero;
         private long _recentPeakTicks;
+        private long _firstAudioTicks;
+        private int _bytesPerSecond;
 
         // Diagnostics (no audio content).
         public string DeviceName { get; private set; } = "";
         public string FormatDescription { get; private set; } = "";
         public string OpenAttempts { get; private set; } = "";
+        /// <summary>v18: the device id that was opened (-1 = WAVE_MAPPER, the Windows default) and its format, for logs.</summary>
+        public int DeviceId { get; private set; } = DefaultDevice;
+        public int OpenedRate { get; private set; }
+        public int OpenedChannels { get; private set; }
+        public SampleKind OpenedKind { get; private set; }
+        /// <summary>Audio that should have arrived by now but didn't (the laptop was too busy), in ms.</summary>
+        public double LostMs
+        {
+            get
+            {
+                long first = Interlocked.Read(ref _firstAudioTicks);
+                if (first == 0 || _bytesPerSecond <= 0) return 0;
+                double elapsed = (DateTime.UtcNow.Ticks - first) / (double)TimeSpan.TicksPerMillisecond;
+                double got = BytesCaptured * 1000.0 / _bytesPerSecond;
+                return Math.Max(0, elapsed - got - 150);   // 150 ms: the buffer still being filled
+            }
+        }
+        /// <summary>Frozen when the recording stops.</summary>
+        public double FinalLostMs { get; private set; }
+        /// <summary>v18: every 16 kHz mono packet is also handed here (Test microphone keeps the 3 s it records).</summary>
+        public Action<byte[]> Tap;
+        public string FormatForLog => "id=" + DeviceId + " " + OpenedRate + "Hz/" + OpenedChannels + "ch/" + OpenedKind + (_resampler != null && _resampler.IsPassThrough ? "" : "->16000Hz/1ch");
         public long BuffersReturned { get; private set; }
         public long EmptyBuffers { get; private set; }
         public int MaxPeak { get; private set; }
@@ -100,7 +128,7 @@ namespace Rapcha.Win
         public long BytesCaptured => Interlocked.Read(ref _bytesCaptured);
 
         /// <summary>True after ~1 s of capture with every sample exactly zero (usually privacy blocked).</summary>
-        public bool LooksSilentlyBlocked => !_sawNonZero && BytesCaptured >= 32000;
+        public bool LooksSilentlyBlocked => !_sawNonZero && BytesCaptured >= Math.Max(32000, _bytesPerSecond);
 
         /// <summary>Level 0..1 on a -60..0 dBFS scale so quiet laptop mics still move the bar.</summary>
         public static float LevelFromRms(double rms)
@@ -188,20 +216,23 @@ namespace Rapcha.Win
             DeviceName = deviceId >= 0 && deviceId < names.Count ? names[deviceId] : "Windows default (" + (names.Count > 0 ? names[0] : "?") + ")";
 
             _event = new AutoResetEvent(false);
-            int[][] formats = { new[] { 16000, 1 }, new[] { 48000, 1 }, new[] { 44100, 1 }, new[] { 48000, 2 }, new[] { 44100, 2 } };
+            // 16-bit PCM first (Windows converts from the driver's format), then 32-bit float (WAVE_FORMAT_IEEE_FLOAT).
+            int[][] formats = { new[] { 16000, 1, 16 }, new[] { 48000, 1, 16 }, new[] { 44100, 1, 16 }, new[] { 48000, 2, 16 }, new[] { 44100, 2, 16 },
+                                new[] { 48000, 2, 32 }, new[] { 44100, 2, 32 }, new[] { 48000, 1, 32 } };
             int rc = -1;
-            int rate = 0, channels = 0;
+            int rate = 0, channels = 0, bits = 16;
             var attempts = new List<string>();
             foreach (var f in formats)
             {
-                rate = f[0]; channels = f[1];
+                rate = f[0]; channels = f[1]; bits = f[2];
+                int bytes = bits / 8;
                 var fmt = new WAVEFORMATEX
                 {
-                    wFormatTag = 1, nChannels = (ushort)channels, nSamplesPerSec = (uint)rate, wBitsPerSample = 16,
-                    nBlockAlign = (ushort)(2 * channels), nAvgBytesPerSec = (uint)(rate * 2 * channels), cbSize = 0
+                    wFormatTag = (ushort)(bits == 32 ? 3 : 1), nChannels = (ushort)channels, nSamplesPerSec = (uint)rate, wBitsPerSample = (ushort)bits,
+                    nBlockAlign = (ushort)(bytes * channels), nAvgBytesPerSec = (uint)(rate * bytes * channels), cbSize = 0
                 };
                 rc = waveInOpen(out _handle, deviceId, ref fmt, _event.SafeWaitHandle.DangerousGetHandle(), IntPtr.Zero, CALLBACK_EVENT);
-                attempts.Add(rate + "Hz/" + channels + "ch=" + ErrorName(rc));
+                attempts.Add(rate + "Hz/" + channels + "ch/" + (bits == 32 ? "f32" : "s16") + "=" + ErrorName(rc));
                 if (rc == 0) break;
                 if (rc != 32 && rc != 11 && rc != 8) break; // only format errors are worth another format
             }
@@ -216,10 +247,8 @@ namespace Rapcha.Win
                 if (rc == 4) return IsMicPrivacyDenied() ? MicProblem.PrivacyBlocked : MicProblem.InUse;
                 return IsMicPrivacyDenied() ? MicProblem.PrivacyBlocked : MicProblem.Other;
             }
-            FormatDescription = rate + "Hz/" + channels + "ch" + (rate == 16000 && channels == 1 ? "" : " -> resampled to 16000Hz/1ch");
-            _resampler = new PcmResampler(rate, channels);
-            _bufferBytes = rate * 2 * channels / 20; // 50 ms
-            _bufferBytes -= _bufferBytes % (2 * channels);
+            var kind = bits == 32 ? SampleKind.Float32 : SampleKind.Int16;
+            Prepare(deviceId, rate, channels, kind);
 
             int hdrSize = Marshal.SizeOf(typeof(WAVEHDR));
             _headers = new IntPtr[BufferCount];
@@ -234,14 +263,6 @@ namespace Rapcha.Win
                 int arc = waveInAddBuffer(_handle, _headers[i], hdrSize);
                 if (prc != 0 || arc != 0) detail += " prepare/add=" + ErrorName(prc) + "/" + ErrorName(arc);
             }
-            _rechunker = new PcmRechunker(_onChunk);
-            _stopAtTicks = long.MaxValue;
-            _hardStop = false;
-            _bytesCaptured = 0;
-            _sawNonZero = false;
-            BuffersReturned = 0;
-            EmptyBuffers = 0;
-            MaxPeak = 0;
             rc = waveInStart(_handle);
             if (rc != 0)
             {
@@ -252,6 +273,47 @@ namespace Rapcha.Win
             _thread = new Thread(Loop) { IsBackground = true, Name = "Rapcha mic", Priority = ThreadPriority.AboveNormal };
             _thread.Start();
             return MicProblem.None;
+        }
+
+        private void Prepare(int deviceId, int rate, int channels, SampleKind kind)
+        {
+            DeviceId = deviceId;
+            OpenedRate = rate; OpenedChannels = channels; OpenedKind = kind;
+            _resampler = new PcmResampler(rate, channels, kind);
+            FormatDescription = rate + "Hz/" + channels + "ch" + (kind == SampleKind.Float32 ? "/float" : "") + (_resampler.IsPassThrough ? "" : " -> resampled to 16000Hz/1ch");
+            int frame = PcmResampler.BytesPerSample(kind) * channels;
+            _bytesPerSecond = rate * frame;
+            _bufferBytes = _bytesPerSecond / 20; // 50 ms
+            _bufferBytes -= _bufferBytes % frame;
+            _rechunker = new PcmRechunker(_onChunk);
+            _stopAtTicks = long.MaxValue;
+            _hardStop = false;
+            _bytesCaptured = 0;
+            _firstAudioTicks = 0;
+            _sawNonZero = false;
+            BuffersReturned = 0;
+            EmptyBuffers = 0;
+            MaxPeak = 0;
+            FinalLostMs = 0;
+        }
+
+        /// <summary>
+        /// v18 self-test and Test microphone simulation: the exact conversion path (resampler, levels, 100 ms packets)
+        /// fed with buffers as a driver would hand them over, without a microphone. Call PushNative, then FinishNative.
+        /// </summary>
+        public void StartSimulated(int rate, int channels, SampleKind kind, string deviceName)
+        {
+            DeviceName = deviceName ?? "";
+            OpenAttempts = "simulated";
+            Prepare(-2, rate, channels, kind);
+        }
+
+        public void PushNative(byte[] buffer, int count) => Convert(buffer, count);
+
+        public void FinishNative()
+        {
+            FinalLostMs = 0;
+            _rechunker.FlushTail();
         }
 
         /// <summary>Keeps recording for tailMs, flushes everything captured, then releases the mic.</summary>
@@ -318,6 +380,7 @@ namespace Rapcha.Win
             catch (Exception) { }
             finally
             {
+                FinalLostMs = LostMs;
                 Cleanup();
                 try { _onLevel?.Invoke(0f); } catch { }
             }
@@ -327,13 +390,22 @@ namespace Rapcha.Win
         {
             int n = (int)Math.Min(hdr.dwBytesRecorded, (uint)copy.Length);
             Marshal.Copy(hdr.lpData, copy, 0, n);
+            Convert(copy, n);
+        }
+
+        /// <summary>Driver-format bytes in; 16 kHz mono 16-bit packets out (the same path for every engine).</summary>
+        private void Convert(byte[] copy, int n)
+        {
+            if (n <= 0) return;
+            if (Interlocked.Read(ref _firstAudioTicks) == 0)
+                Interlocked.Exchange(ref _firstAudioTicks, DateTime.UtcNow.Ticks - TimeSpan.TicksPerSecond * n / Math.Max(1, _bytesPerSecond));
             Interlocked.Add(ref _bytesCaptured, n);
-            if (!_sawNonZero)
-            {
-                for (int i = 0; i < n; i++) if (copy[i] != 0) { _sawNonZero = true; break; }
-            }
             var pcm16k = _resampler.Process(copy, n);
             if (pcm16k.Length == 0) return;
+            if (!_sawNonZero)
+            {
+                for (int i = 0; i < pcm16k.Length; i++) if (pcm16k[i] != 0) { _sawNonZero = true; break; }
+            }
             try
             {
                 int peak = SpeechGain.Peak(pcm16k, pcm16k.Length);
@@ -346,6 +418,7 @@ namespace Rapcha.Win
                 _onLevel?.Invoke(LevelFromRms(SpeechGain.Rms(pcm16k, pcm16k.Length)));
             }
             catch { }
+            try { Tap?.Invoke(pcm16k); } catch { }
             _rechunker.Write(pcm16k, 0, pcm16k.Length);
         }
 

@@ -49,6 +49,8 @@ namespace Rapcha.Win
         private readonly OfflineCard _offlineCard = new OfflineCard();
         internal OfflineCard Offline => _offlineCard;
         private readonly SnoozeCard _snoozeCard = new SnoozeCard();
+        private readonly MicTestCard _micTest = new MicTestCard();
+        internal MicTestCard MicTest => _micTest;
         internal SnoozeCard SnoozeSettings => _snoozeCard;
         private readonly GlowPicker _glow = new GlowPicker();
         private readonly ShortcutsRows _shortcuts = new ShortcutsRows();
@@ -161,6 +163,9 @@ namespace Rapcha.Win
                 Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only."),
                 _key, _show, Row(_save), _status));
             _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_micSettings)));
+            _layout.Controls.Add(_micTest.Card);
+            _micTest.Starting += StopMeter;            // one recording at a time
+            _micTest.Finished += () => { if (!_meterPaused && _pageShown && !IsDisposed) RestartMeter(); };
             _layout.Controls.Add(_offlineCard.Card);
             _layout.Controls.Add(Card("Glow colour",
                 Help("Applies to the ring glow, the words box, the text-box outline and the select-to-speak screen glow."),
@@ -400,7 +405,7 @@ namespace Rapcha.Win
                 try { BeginInvoke(new Action(() => { if (!IsDisposed) _level.Value = Math.Max(0, Math.Min(100, (int)(level * 100))); })); } catch { }
             });
             var problem = _meter.Start(device, out var detail);
-            AppStorage.Log("Mic test: device=\"" + _meter.DeviceName + "\" result=" + problem + " format=" + _meter.FormatDescription + " attempts=[" + _meter.OpenAttempts + "] " + detail);
+            AppStorage.Log("Mic meter: device " + _meter.FormatForLog + " result=" + problem + " attempts=[" + _meter.OpenAttempts + "] " + detail);
             if (problem != MicProblem.None)
             {
                 _meter = null;

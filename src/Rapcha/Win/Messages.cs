@@ -21,6 +21,8 @@ namespace Rapcha.Win
         public const string GeminiSlow = "Gemini didn't answer in time. Check your internet and try again.";
         public const string TimeLimit = "Time limit reached, so Rapcha stopped. Your words are kept.";
         public const string LowMemory = "Stopped early because your laptop is low on memory. Your words are kept.";
+        public const string RapchaMemory = "Stopped early because Rapcha was using too much memory. Your words are kept.";
+        public const string JustStopped = "Rapcha stopped by itself. Tap again to start a new dictation.";
         public const string OfflineOff = "No internet connection. Turn on Offline fallback in Settings to keep typing without internet.";
         public const string OfflineNoSpeech = "You're offline and this laptop has no Windows speech yet. In Settings, press Get Windows speech.";
 
