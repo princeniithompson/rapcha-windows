@@ -142,7 +142,8 @@ namespace Rapcha.Win
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
-            if (!Visible && _settings != null) _settings.SetPageShown(false);
+            if (_settings != null) _settings.SetPageShown(Visible && _page == Page.Settings);
+            if (_diag != null) _diag.SetShown(Visible && _page == Page.Diagnostics);
         }
 
         protected override void OnShown(EventArgs e)
