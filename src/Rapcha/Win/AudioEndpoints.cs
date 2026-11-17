@@ -30,8 +30,15 @@ namespace Rapcha.Win
         [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         private interface IMMDeviceEnumerator
         {
-            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
             [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+        }
+
+        [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDeviceCollection
+        {
+            [PreserveSig] int GetCount(out int count);
+            [PreserveSig] int Item(int index, out IMMDevice device);
         }
 
         [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -99,6 +106,80 @@ namespace Rapcha.Win
             }
             catch (Exception e) { info.Error = e.GetType().Name; }
             return info;
+        }
+
+        /// <summary>v19: one recording device as Windows lists it (for Diagnostics).</summary>
+        public sealed class Endpoint
+        {
+            public string Name = "", State = "", MixFormat = "", Exclusive = "unknown";
+            public bool IsDefault, IsDefaultComms;
+            public int WaveInIndex = -1;
+        }
+
+        /// <summary>v19: every recording device (active, disabled, unplugged), read-only; never opens a stream.</summary>
+        public static System.Collections.Generic.List<Endpoint> All(out string error)
+        {
+            error = "";
+            var list = new System.Collections.Generic.List<Endpoint>();
+            try
+            {
+                var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+                string defId = "", commsId = "";
+                try { if (en.GetDefaultAudioEndpoint(eCapture, eConsole, out var d) == 0 && d != null) d.GetId(out defId); } catch { }
+                try { if (en.GetDefaultAudioEndpoint(eCapture, eCommunications, out var c) == 0 && c != null) c.GetId(out commsId); } catch { }
+                if (en.EnumAudioEndpoints(eCapture, 0xF, out var col) != 0 || col == null) { error = "could not list devices"; return list; }
+                col.GetCount(out int n);
+                var wave = WaveInRecorder.ListDevices();
+                for (int i = 0; i < n; i++)
+                {
+                    if (col.Item(i, out var dev) != 0 || dev == null) continue;
+                    var e = new Endpoint();
+                    try
+                    {
+                        e.Name = NameOf(dev);
+                        dev.GetId(out var id);
+                        e.IsDefault = id != null && id == defId;
+                        e.IsDefaultComms = id != null && id == commsId;
+                        dev.GetState(out int st);
+                        e.State = st == 1 ? "active" : st == 2 ? "disabled" : st == 4 ? "not present" : st == 8 ? "unplugged" : "state " + st;
+                        for (int w = 0; w < wave.Count; w++)
+                            if (wave[w].Length > 0 && e.Name.StartsWith(wave[w], StringComparison.OrdinalIgnoreCase)) { e.WaveInIndex = w; break; }
+                        e.Exclusive = ExclusiveAllowed(dev);
+                        if (st == 1)
+                        {
+                            var iid = IID_IAudioClient;
+                            if (dev.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out var o) == 0 && o is IAudioClient client)
+                            {
+                                if (client.GetMixFormat(out var fmt) == 0 && fmt != IntPtr.Zero)
+                                {
+                                    var info = new Info();
+                                    try { Parse(fmt, ref info); e.MixFormat = info.NativeFormat; }
+                                    finally { Marshal.FreeCoTaskMem(fmt); }
+                                }
+                                Marshal.ReleaseComObject(client);
+                            }
+                        }
+                    }
+                    catch (Exception x) { e.MixFormat = "unknown (" + x.GetType().Name + ")"; }
+                    list.Add(e);
+                }
+            }
+            catch (Exception x) { error = x.GetType().Name; }
+            return list;
+        }
+
+        /// <summary>"Allow applications to take exclusive control of this device" (Sound control panel, Advanced tab).</summary>
+        private static string ExclusiveAllowed(IMMDevice dev)
+        {
+            try
+            {
+                if (dev.OpenPropertyStore(0, out var store) != 0 || store == null) return "unknown";
+                var key = new PROPERTYKEY { fmtid = new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc"), pid = 3 };
+                if (store.GetValue(ref key, out var v) != 0) return "unknown";
+                try { return v.vt == 11 ? ((v.p.ToInt64() & 0xFFFF) != 0 ? "allowed" : "not allowed") : "unknown"; }
+                finally { PropVariantClear(ref v); }
+            }
+            catch { return "unknown"; }
         }
 
         private static void Parse(IntPtr fmt, ref Info info)

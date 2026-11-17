@@ -50,6 +50,15 @@ namespace Rapcha.Win
                 Application.Run(new V11SelfTest(args[1]));
                 return;
             }
+            if (args.Length >= 2 && args[0] == "--selftest-v19")
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.ThreadException += (s, e) => { Report(e.Exception); Environment.Exit(1); };
+                LoadIcons();
+                Application.Run(new RapchaApp(selfTestV19: args[1]));
+                return;
+            }
             if (args.Length >= 2 && args[0] == "--selftest-v18")
             {
                 Application.EnableVisualStyles();
@@ -144,6 +153,7 @@ namespace Rapcha.Win
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Report(e.ExceptionObject as Exception);
 
                 LoadIcons();
+                try { DiagnosticsInfo.Start(Array.IndexOf(args, "--autostart") >= 0 ? "autostart" : "opened"); } catch { }
                 Shortcuts.Ensure();
                 // Every manual launch (double-click, Desktop/Start shortcut, a downloaded "Rapcha (4).exe") ends with the
                 // main window visible. "--autostart" (for a future sign-in start) stays quiet with just the ring.
@@ -178,6 +188,7 @@ namespace Rapcha.Win
         {
             if (ex == null) return;
             AppStorage.Log("Unhandled: " + ex);
+            Rapcha.Core.DiagLog.Error("unhandled error", ex);
         }
     }
 }

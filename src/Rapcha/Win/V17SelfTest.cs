@@ -15,7 +15,7 @@ namespace Rapcha.Win
 {
     /// <summary>
     /// CI self-test for v17 (--selftest-v17 outDir), run inside the real app (ring, tray menu, Settings):
-    /// hold-to-snooze (a quick drag across the middle never shows the circle; held still ~5.5 s it does; dropped on
+    /// hold-to-snooze (a quick drag across the middle never shows the circle; held still ~3 s it does (v19); dropped on
     /// it the ring hides; dropped elsewhere it docks), "Wake Rapcha now" in the tray menu and on Home, the snooze
     /// coming back by itself, a shortcut waking it, Settings → Snooze durations saved; Whisper on a Low laptop
     /// ("Download lightest model anyway", the warning, a real Tiny download, Whisper chosen offline with a 2 minute
@@ -121,15 +121,15 @@ namespace Rapcha.Win
             await Task.Delay(200);
             bool quickOk = noCircleQuick && !Snooze.Active && ring.Visible && OnEdge(ring.RingBounds, wa);
 
-            // 2. A slow wander through the middle, moving a bit more than the tolerance every 300 ms for 8 s: no circle.
+            // 2. A slow wander through the middle, moving more than the tolerance (10 px x DPI, v19) every 300 ms for 4.5 s: no circle.
             ring.SimulatePress();
             var c0 = new Point(wa.X + wa.Width * 2 / 5, wa.Y + wa.Height * 2 / 5);
-            for (int i = 0; i < 27; i++) { ring.SimulateMoveTo(new Point(c0.X + i * 12, c0.Y)); await Task.Delay(300); }
+            for (int i = 0; i < 15; i++) { ring.SimulateMoveTo(new Point(c0.X + i * 22, c0.Y)); await Task.Delay(300); }
             bool noCircleWander = !ring.SnoozeTarget.Showing;
             ring.SimulateRelease();
             await Task.Delay(200);
 
-            // 3. Held still (2 px of hand jitter) in the middle: the circle appears after ~5.5 s.
+            // 3. Held still (2 px of hand jitter) in the middle: the circle appears after ~3 s (v19).
             var (armedMs, shown) = await HoldStill(ring, c0);
             bool holdOk = shown && armedMs >= SnoozeHold.HoldMs - 50 && armedMs <= SnoozeHold.HoldMs + 1500;
             var circle = ring.SnoozeTarget;

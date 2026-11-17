@@ -51,6 +51,18 @@ RW_API void * rw_load(const wchar_t * path, int threads_hint)
     return ctx;
 }
 
+// v19 diagnostics: per segment of the last rw_transcribe: no-speech probability, average token log-probability,
+// token count, kept (1) or dropped as non-speech (0), start and end (centiseconds). No text.
+static float g_stats[64 * 6];
+static int g_nstats = 0;
+
+RW_API int rw_stats(float * out, int cap)
+{
+    int n = g_nstats * 6 < cap ? g_nstats : cap / 6;
+    for (int i = 0; i < n * 6; ++i) out[i] = g_stats[i];
+    return g_nstats;
+}
+
 // samples: 16 kHz mono float PCM. prompt (UTF-8, may be null): custom vocabulary and the previous piece's text.
 // Writes UTF-8 text to out; returns the bytes it needs (excluding the 0), or a negative number on failure.
 RW_API int rw_transcribe(void * ctx, const float * samples, int n, int threads, const char * prompt, const char * lang,
@@ -79,13 +91,32 @@ RW_API int rw_transcribe(void * ctx, const float * samples, int n, int threads, 
     p.no_speech_thold = 0.6f;
     p.language = (lang && *lang) ? lang : "en";
     p.initial_prompt = (prompt && *prompt) ? prompt : nullptr;
+    g_nstats = 0;
     if (whisper_full((whisper_context *) ctx, p, samples, n) != 0) return -2;
     std::string text;
-    const int segs = whisper_full_n_segments((whisper_context *) ctx);
+    whisper_context * wc = (whisper_context *) ctx;
+    const int segs = whisper_full_n_segments(wc);
+    const whisper_token eot = whisper_token_eot(wc);
+    g_nstats = segs < 64 ? segs : 64;
     for (int i = 0; i < segs; ++i)
     {
+        const float nsp = whisper_full_get_segment_no_speech_prob(wc, i);
+        if (i < 64)
+        {
+            const int nt = whisper_full_n_tokens(wc, i);
+            double sum = 0; int cnt = 0;
+            for (int j = 0; j < nt; ++j)
+            {
+                whisper_token_data d = whisper_full_get_token_data(wc, i, j);
+                if (d.id >= eot) continue;   // special tokens
+                sum += d.plog; ++cnt;
+            }
+            float * st = g_stats + i * 6;
+            st[0] = nsp; st[1] = cnt > 0 ? (float) (sum / cnt) : 0.0f; st[2] = (float) cnt; st[3] = nsp > 0.85f ? 0.0f : 1.0f;
+            st[4] = (float) whisper_full_get_segment_t0(wc, i); st[5] = (float) whisper_full_get_segment_t1(wc, i);
+        }
         // a segment Whisper itself thinks is not speech is dropped (it is where "thanks for watching" comes from)
-        if (whisper_full_get_segment_no_speech_prob((whisper_context *) ctx, i) > 0.85f) continue;
+        if (nsp > 0.85f) continue;
         const char * t = whisper_full_get_segment_text((whisper_context *) ctx, i);
         if (t) text += t;
     }

@@ -31,7 +31,7 @@ namespace Rapcha.Win
         public SnoozeCard()
         {
             Card.Controls.Add(new Label { Text = "Snooze", AutoSize = true, Font = new Font(Theme.Serif, 14f), ForeColor = Theme.Ink, BackColor = Color.Transparent, Margin = new Padding(0, 0, 0, 6) });
-            Card.Controls.Add(Note("To hide Rapcha for a while, drag the ring to the middle of the screen and hold it still for about 5 seconds. " +
+            Card.Controls.Add(Note("To hide Rapcha for a while, drag the ring to the middle of the screen and hold it still for about 3 seconds. " +
                                    "A Snooze circle appears: drop the ring on it. Dropping it anywhere else docks it at the edge as usual."));
             Card.Controls.Add(new Label { Text = "Snooze for:", AutoSize = true, Font = new Font(Theme.Sans, 10f, FontStyle.Bold), ForeColor = Theme.Ink, BackColor = Color.White, Margin = new Padding(0, 6, 0, 2) });
             Card.Controls.Add(_m19);

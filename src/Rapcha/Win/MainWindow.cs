@@ -14,13 +14,14 @@ namespace Rapcha.Win
     internal sealed class MainWindow : Form
     {
         public const string WindowTitle = "Rapcha for Windows";
-        public enum Page { Home, Vocabulary, Settings }
+        public enum Page { Home, Vocabulary, Settings, Diagnostics }
 
         private readonly NavRail _nav = new NavRail();
         private readonly Panel _content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Cream };
         private readonly HomeView _home = new HomeView { Dock = DockStyle.Fill };
         private readonly VocabularyView _vocab = new VocabularyView { Dock = DockStyle.Fill };
         private readonly SettingsPage _settings;
+        private readonly DiagnosticsView _diag = new DiagnosticsView { Dock = DockStyle.Fill };
         private readonly Action _onHistory;
         private Page _page = (Page)(-1);
 
@@ -55,6 +56,7 @@ namespace Rapcha.Win
             _content.Controls.Add(_home);
             _content.Controls.Add(_vocab);
             _content.Controls.Add(_settings);
+            _content.Controls.Add(_diag);
             _wake.BackColor = Theme.Chip;
             _wake.Click += (s, e) => Snooze.Wake("Home: Wake Rapcha now");
             _snoozeBar.Controls.Add(_snoozeText);
@@ -75,6 +77,7 @@ namespace Rapcha.Win
         public HomeView Home => _home;
         public VocabularyView Vocabulary => _vocab;
         public SettingsPage Settings => _settings;
+        public DiagnosticsView Diagnostics => _diag;
         public Page Current => _page;
 
         public void ShowPage(Page page)
@@ -84,6 +87,8 @@ namespace Rapcha.Win
             _home.Visible = page == Page.Home;
             _vocab.Visible = page == Page.Vocabulary;
             _settings.Visible = page == Page.Settings;
+            _diag.Visible = page == Page.Diagnostics;
+            _diag.SetShown(page == Page.Diagnostics);
             if (page == Page.Vocabulary) _vocab.Reload();
             _settings.SetPageShown(page == Page.Settings && Visible);
             _nav.Active = page;
@@ -126,6 +131,20 @@ namespace Rapcha.Win
             CenterToScreen();
         }
 
+        // v19: the Settings level meter only runs while this window is the active, non-minimised window.
+        protected override void OnActivated(EventArgs e) { base.OnActivated(e); _settings.SetWindowActive(true); }
+        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); _settings.SetWindowActive(false); }
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (WindowState == FormWindowState.Minimized && _settings != null) _settings.SetWindowActive(false);
+        }
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (!Visible && _settings != null) _settings.SetPageShown(false);
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -138,6 +157,7 @@ namespace Rapcha.Win
             Snooze.Changed -= _onSnooze;
             _snoozeTick.Dispose();
             _settings.SetPageShown(false);
+            _diag.SetShown(false);
             base.OnFormClosed(e);
         }
 
@@ -154,7 +174,7 @@ namespace Rapcha.Win
         /// <summary>The left nav rail: lifebuoy + "Rapcha", then Home / Vocabulary / Settings.</summary>
         private sealed class NavRail : DrawnControl
         {
-            private static readonly string[] Names = { "Home", "Vocabulary", "Settings" };
+            private static readonly string[] Names = { "Home", "Vocabulary", "Settings", "Diagnostics" };
             private Page _active;
             private int _hot = -1;
             public event Action<Page> PageClicked;
@@ -203,6 +223,10 @@ namespace Rapcha.Win
                             using (var p = Theme.Round(new RectangleF(x + w * 0.15f, y + h * 0.1f, w * 0.7f, h * 0.8f), 2 * S)) g.DrawPath(pen, p);
                             g.DrawLine(pen, x + w * 0.32f, y + h * 0.36f, x + w * 0.68f, y + h * 0.36f);
                             g.DrawLine(pen, x + w * 0.32f, y + h * 0.56f, x + w * 0.6f, y + h * 0.56f);
+                            break;
+                        case 3: // pulse line (diagnostics)
+                            g.DrawLines(pen, new[] { new PointF(x + w * 0.05f, y + h * 0.55f), new PointF(x + w * 0.3f, y + h * 0.55f), new PointF(x + w * 0.42f, y + h * 0.2f),
+                                new PointF(x + w * 0.58f, y + h * 0.88f), new PointF(x + w * 0.7f, y + h * 0.55f), new PointF(x + w * 0.95f, y + h * 0.55f) });
                             break;
                         default: // sliders
                             g.DrawLine(pen, x + w * 0.1f, y + h * 0.3f, x + w * 0.9f, y + h * 0.3f);

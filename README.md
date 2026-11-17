@@ -73,9 +73,22 @@ Offline, your words get a light clean-up without any model: capitals at the star
 
 **Memory.** Rapcha no longer stops a dictation because Windows reports little free memory (a 4 GB laptop always does). It stops early only if Rapcha itself grows too big (over 1.6 GB with Whisper, 1 GB with built-in speech) or holds too much audio, and, for Whisper only, if Windows has under 100 MB free for 5 seconds in a row. Built-in Windows speech is never stopped for Windows' memory. After Rapcha stops by itself, a tap or shortcut in the next 3 seconds does not start a new dictation (it is usually your own "stop" arriving late).
 
+## Diagnostics (v19)
+
+Open Rapcha and click **Diagnostics** on the left. It shows whether the microphone is open right now and what opened it, and a live list of everything Rapcha does with audio: every time the microphone opens and closes, each dictation (how it started, which engine and why, how it ended), one line per second of audio (level, clipping, how much was speech, missing audio), one line per offline piece (Whisper's no-speech probability, confidence, tokens, filters; built-in speech's confidence and alternatives), memory every second, and errors. It also lists your PC (Windows version, memory, processor) and every recording device with the format Windows runs it at.
+
+- **Save as .txt** saves it all to a file (Documents\Rapcha-diagnostics-date.txt by default). Send that file.
+- **Copy** puts the same text on the clipboard. **Clear** empties the list.
+- **Include transcribed text (for debugging)** is off by default. Only when you tick it are the words each engine heard added. The file has no API key either way.
+- **Save last session audio (WAV)** saves the audio of your last dictation (up to 3 minutes) next to the .txt. It has your voice in it, so it is only saved when you press it.
+
+Rapcha also keeps the same list (without words) in `%AppData%\Rapcha\diagnostics`, at most 3 files of 5 MB.
+
+**Microphone always in use (fixed in v19).** The level bar in Settings → Microphone used to keep the microphone open the whole time the Settings page was open, even behind other windows or minimised, and opened it again after every dictation, so Windows showed the microphone as in use all the time. Now the bar only runs when you press **Check level**, stops after 30 seconds, and stops as soon as you switch to another window.
+
 ## Snooze
 
-Drag the ring to the middle of the screen and hold it still for about 5 seconds. A round **Snooze** circle appears in the middle; drop the ring on it and Rapcha hides for 19 minutes (change it in **Settings → Snooze**: 19 minutes, 1 hour, 2 hours, or any number of minutes). It comes back by itself, in the same spot. Quick drags across the screen never show the circle, and dropping the ring anywhere else docks it at the edge as usual.
+Drag the ring to the middle of the screen and hold it still for about 3 seconds. A round **Snooze** circle appears in the middle; drop the ring on it and Rapcha hides for 19 minutes (change it in **Settings → Snooze**: 19 minutes, 1 hour, 2 hours, or any number of minutes). It comes back by itself, in the same spot. Quick drags across the screen never show the circle, and dropping the ring anywhere else docks it at the edge as usual.
 
 To wake it early: right-click the Rapcha tray icon and choose **Wake Rapcha now** (it shows the time left), or press **Wake Rapcha now** on the Home page. Your shortcuts keep working while snoozed: pressing a voice-typing or select-to-speak shortcut wakes Rapcha and starts as usual. Opening Rapcha again (from the Start menu or the exe) also wakes it. The end time is saved, so a restart during a snooze stays snoozed until the time is up.
 

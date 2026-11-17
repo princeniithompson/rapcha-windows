@@ -74,7 +74,7 @@ namespace Rapcha.Win
         private const string TrayIdle = "Rapcha - click the ring to talk";
 
         /// <param name="showMain">A manual launch (double-click, shortcut): show the main window. Autostart stays quiet.</param>
-        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null, string selfTestV18 = null)
+        public RapchaApp(string selfTestOcr = null, bool selfTestRing = false, bool showMain = false, string selfTestV17 = null, string selfTestV18 = null, string selfTestV19 = null)
         {
             _selfTestOcr = selfTestOcr;
             _selfTestRing = selfTestRing;
@@ -147,7 +147,7 @@ namespace Rapcha.Win
             _watch.Tick += OnWatchTick;
 
             _ring.ShowDocked();
-            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null || selfTestV18 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
+            if (Snooze.Due || (Snooze.Active && (showMain || selfTestOcr != null || selfTestRing || selfTestV17 != null || selfTestV18 != null || selfTestV19 != null))) Snooze.Wake(Snooze.Due ? "time was up while Rapcha was closed" : "Rapcha was opened");
             else if (Snooze.Active) { AppStorage.Log("Snooze: still on after a restart (" + Snooze.LeftText + ")"); ApplySnooze(); }
             ShellWindows.Hook();
             ShellWindows.ForegroundChanged += OnForegroundChanged;
@@ -178,6 +178,7 @@ namespace Rapcha.Win
             if (_selfTestRing) { RunRingSelfTest(); return; }
             if (selfTestV17 != null) { new V17SelfTest(this, selfTestV17).Start(); return; }
             if (selfTestV18 != null) { new V18SelfTest(this, selfTestV18).Start(); return; }
+            if (selfTestV19 != null) { new V19SelfTest(this, selfTestV19).Start(); return; }
             if (showMain || LiveSession.IsPlaceholder(AppStorage.LoadApiKey())) OpenForLaunch();
         }
 
@@ -211,7 +212,7 @@ namespace Rapcha.Win
             {
                 case ShortcutAction.TapToTalk:
                     if (!down) return;
-                    if (_phase == Phase.Idle) { if (GateAllows("tap shortcut")) StartRecording(); }
+                    if (_phase == Phase.Idle) { if (GateAllows("tap shortcut")) StartRecording("tap shortcut"); }
                     else if (_phase == Phase.Recording) _ = FinishAsync();
                     break;
                 case ShortcutAction.HoldToTalk:
@@ -219,7 +220,7 @@ namespace Rapcha.Win
                     {
                         if (_phase != Phase.Idle) return;
                         if (!GateAllows("hold shortcut")) return;
-                        StartRecording();
+                        StartRecording("hold shortcut");
                         _holdSession = _phase == Phase.Recording;
                     }
                     else
@@ -259,7 +260,7 @@ namespace Rapcha.Win
             }
             switch (_phase)
             {
-                case Phase.Idle: if (GateAllows("ring tap")) StartRecording(); break;
+                case Phase.Idle: if (GateAllows("ring tap")) StartRecording("ring tap"); break;
                 case Phase.Recording: _ = FinishAsync(); break;
             }
         }
@@ -282,7 +283,20 @@ namespace Rapcha.Win
             return false;
         }
 
-        private void StartRecording()
+        /// <summary>v19: the audio the engines got in the last dictation, for Diagnostics → Save last session audio.</summary>
+        internal static readonly LastAudio LastSessionAudio = new LastAudio();
+        /// <summary>v19: which engine the last dictation used and why (Diagnostics header).</summary>
+        internal static string LastEngineWhy = "no dictation yet";
+
+        private static string EngineWhy(bool online, EngineChoice choice)
+        {
+            if (online) return "Gemini (online: the internet looks reachable)";
+            var i = OfflineEngines.Inputs(false);
+            return (choice.Ok ? choice.Engine.ToString() : "none (" + choice.Why + ")") + " (offline: tier=" + DeviceTiers.Name(i.Tier) + " offline_fallback=" + i.OfflineFallback +
+                   " whisper_model_ready=" + i.WhisperModelReady + " whisper_blocked=" + i.WhisperBlocked + " whisper_fits_memory=" + i.WhisperFitsMemory + " built_in_available=" + i.BuiltInAvailable + ")";
+        }
+
+        private void StartRecording(string trigger = "other")
         {
             RecordingStarts++;
             var key = AppStorage.LoadApiKey();
@@ -353,9 +367,10 @@ namespace Rapcha.Win
                 HookOffline(offline, gen);
             }
 
+            LastSessionAudio.Clear();
             var recorder = new WaveInRecorder(
-                chunk => router.Feed(chunk),
-                level => _ring.Level = level);
+                chunk => { LastSessionAudio.Add(chunk); router.Feed(chunk); },
+                level => _ring.Level = level, "voice typing", true);
             int device = WaveInRecorder.ResolveDevice(AppStorage.LoadMicDevice());
             var problem = recorder.Start(device, out var detail);
             AppStorage.Log("[s" + number + "] start: device " + recorder.FormatForLog +
@@ -392,6 +407,9 @@ namespace Rapcha.Win
             _hotkeys.Register(EscHotkeyId, Native.VK_ESCAPE);
             _watch.Start();
             AppStorage.Log("[s" + number + "] engine=" + _engine + " tier=" + DeviceTiers.Name(DeviceProbe.Tier) + " max_s=" + _maxSeconds + (online ? "" : " (offline at start)"));
+            LastEngineWhy = _engine + " - " + (offline != null && choice.Engine != _engine ? "Whisper could not start, used built-in; " : "") + EngineWhy(online, choice);
+            DiagLog.Add("session", "SESSION " + number + " START trigger=" + trigger + " engine=" + LastEngineWhy + " device " + recorder.FormatForLog +
+                        " attempts=[" + recorder.OpenAttempts + "] max_s=" + _maxSeconds + (offline is BuiltInEngine b && b.OwnMicrophone ? " (built-in listens to the Windows default mic itself; Rapcha's recorder also runs)" : ""));
             if (note.Length > 0) ShowLabel(note, 6000, true);
             if (session != null)
             {
@@ -502,15 +520,17 @@ namespace Rapcha.Win
                 _ = FinishAsync(Messages.TimeLimit);
                 return;
             }
-            if (_offline != null && (DateTime.UtcNow - _lastMemCheck).TotalMilliseconds >= 1000)
+            if ((DateTime.UtcNow - _lastMemCheck).TotalMilliseconds >= 1000)
             {
                 _lastMemCheck = DateTime.UtcNow;
                 long free = DeviceProbe.FreeRamMb();
                 long priv = -1;
                 try { _self.Refresh(); priv = _self.PrivateMemorySize64 / (1024 * 1024); } catch { }
                 long held = -1;
-                try { held = _offline.HeldAudioBytes; } catch { }
-                if (_memGuard.ShouldStop(elapsed.TotalSeconds, _engine, priv, free, held, out var mwhy))
+                try { held = _offline?.HeldAudioBytes ?? 0; } catch { }
+                DiagLog.Add("memory", "s" + _sessionNumber + " t=" + elapsed.TotalSeconds.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "s private_mb=" + priv + " free_mb=" + free +
+                            " held_audio_kb=" + (held / 1024) + " engine=" + _engine);
+                if (_offline != null && _memGuard.ShouldStop(elapsed.TotalSeconds, _engine, priv, free, held, out var mwhy))
                 {
                     AppStorage.Log("[s" + _sessionNumber + "] stopping: " + mwhy + " at_s=" + (int)elapsed.TotalSeconds + " private_mb=" + priv + " free_mb=" + free + " held_audio_bytes=" + held);
                     _ = FinishAsync(mwhy == "system_memory_floor" ? Messages.LowMemory : Messages.RapchaMemory);
@@ -556,6 +576,13 @@ namespace Rapcha.Win
                 offline?.Dispose();   // Whisper frees its model here
             }
             text = (text ?? "").Trim();
+            string endReason = stopNote == Messages.TimeLimit ? "time limit" : stopNote == Messages.LowMemory ? "low memory on the PC" : stopNote == Messages.RapchaMemory ? "Rapcha memory limit" :
+                               stopNote != null ? "stopped by Rapcha" : automatic ? "stopped by the online service (goAway)" : "you stopped it (tap, shortcut or Done)";
+            DiagLog.Add("session", "SESSION " + number + " END reason=" + endReason + " seconds=" + (DateTime.UtcNow - _startedAt).TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) +
+                        " engine=" + (offline?.Kind ?? SpeechEngine.Gemini) + " result_words=" + TextStats.WordCount(text) + " bytes_captured=" + recorder.BytesCaptured +
+                        " lost_ms=" + (int)recorder.FinalLostMs + " queue_full=" + recorder.QueueFull + " resampler_in=" + recorder.ResamplerIn + " out=" + recorder.ResamplerOut +
+                        " peak=" + recorder.MaxPeak + (offline != null ? " offline " + offline.Summary : ""));
+            DiagLog.Words("session " + number + " final", text);
             if (offline != null)
                 AppStorage.Log("[s" + number + "] summary: offline " + offline.Summary + " captured_chars=" + (router?.Captured.Length ?? 0) +
                                " device " + recorder.FormatForLog + " bytes_captured=" + recorder.BytesCaptured + " lost_ms=" + (int)recorder.FinalLostMs +
@@ -642,6 +669,7 @@ namespace Rapcha.Win
             if (_phase != Phase.Recording) return;
             _generation++;
             AppStorage.Log("[s" + _sessionNumber + "] cancelled");
+            DiagLog.Add("session", "SESSION " + _sessionNumber + " END reason=cancelled (Esc or the X button)");
             var recorder = _recorder;
             var session = _session;
             var offline = _offline;
@@ -657,6 +685,7 @@ namespace Rapcha.Win
             if (gen != _generation || _phase == Phase.Idle) return;
             if (_offline != null) return;   // already switched to offline: Gemini's late errors don't matter
             AppStorage.Log("[s" + _sessionNumber + "] session failed: " + err.Kind);
+            DiagLog.Add("session", "SESSION " + _sessionNumber + " END reason=failed (" + err.Kind + ")");
             _startGate.Stopped(true, DateTime.UtcNow);
             if (err.Kind == LiveErrorKind.NoInternet) Connectivity.MarkOffline();
             if (_phase == Phase.Recording && EnginePolicy.SwitchesOffline(err.Kind) && OfflineSettings.Fallback && TrySwitchToOffline(gen, err.Kind.ToString())) return;

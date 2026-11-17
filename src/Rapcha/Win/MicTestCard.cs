@@ -87,7 +87,7 @@ namespace Rapcha.Win
         private WaveInRecorder NewRecorder() => new WaveInRecorder(_ => { }, level =>
         {
             try { Card.BeginInvoke(new Action(() => { if (!Card.IsDisposed) _meter.Value = Math.Max(0, Math.Min(100, (int)(level * 100))); })); } catch { }
-        });
+        }, "Test microphone", true);
 
         private void Start()
         {

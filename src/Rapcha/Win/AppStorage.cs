@@ -211,6 +211,7 @@ namespace Rapcha.Win
                 lock (LogLock) File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + line + Environment.NewLine);
             }
             catch { }
+            Rapcha.Core.DiagLog.Add("log", line);   // v19: every log line is also on the Diagnostics timeline
         }
 
         private static readonly object LogLock = new object();

@@ -119,11 +119,28 @@ namespace Rapcha.Win
         public int RecentPeak => DateTime.UtcNow.Ticks - Interlocked.Read(ref _recentPeakTicks) < TimeSpan.TicksPerMillisecond * 1500 ? _recentPeak : 0;
         private volatile int _recentPeak;
 
-        public WaveInRecorder(Action<byte[]> onChunk, Action<float> onLevel)
+        /// <param name="owner">v19: who opens the microphone (shown in Diagnostics: "voice typing", "Settings level meter", "Test microphone").</param>
+        /// <param name="diag">v19: write a line of audio numbers every second to Diagnostics.</param>
+        public WaveInRecorder(Action<byte[]> onChunk, Action<float> onLevel, string owner = "voice typing", bool diag = false)
         {
             _onChunk = onChunk;
             _onLevel = onLevel;
+            Owner = owner;
+            _diag = diag;
         }
+
+        public string Owner { get; }
+        private readonly bool _diag;
+        private int _micId;
+        /// <summary>v19: the last voice-typing open (format, attempts), for the Diagnostics page.</summary>
+        public static string LastOpen = "none yet";
+        /// <summary>Times every buffer was already full when the recorder thread woke up (the driver may have had to drop audio).</summary>
+        public long QueueFull { get; private set; }
+        public long ResamplerIn { get; private set; }
+        public long ResamplerOut { get; private set; }
+        private readonly List<short> _second = new List<short>(16000);
+        private double _lostAtLastSecond;
+        private long _secondIndex, _queueFullAtLastSecond;
 
         public long BytesCaptured => Interlocked.Read(ref _bytesCaptured);
 
@@ -208,9 +225,9 @@ namespace Rapcha.Win
         public MicProblem Start(int deviceId, out string detail)
         {
             detail = "";
-            if (IsMicPrivacyDenied()) { detail = "privacy setting is Deny"; return MicProblem.PrivacyBlocked; }
+            if (IsMicPrivacyDenied()) { detail = "privacy setting is Deny"; DiagLog.Warn("mic open refused for " + Owner + ": Windows microphone privacy setting is Deny"); return MicProblem.PrivacyBlocked; }
             int count = waveInGetNumDevs();
-            if (count == 0) { detail = "waveInGetNumDevs=0"; return MicProblem.NoMicrophone; }
+            if (count == 0) { detail = "waveInGetNumDevs=0"; DiagLog.Warn("mic open failed for " + Owner + ": no capture devices (waveInGetNumDevs=0)"); return MicProblem.NoMicrophone; }
             if (deviceId >= count) deviceId = DefaultDevice;
             var names = ListDevices();
             DeviceName = deviceId >= 0 && deviceId < names.Count ? names[deviceId] : "Windows default (" + (names.Count > 0 ? names[0] : "?") + ")";
@@ -240,6 +257,7 @@ namespace Rapcha.Win
             if (rc != 0)
             {
                 detail = OpenAttempts;
+                DiagLog.Warn("mic open failed for " + Owner + ": attempts [" + OpenAttempts + "]");
                 _event.Dispose();
                 _event = null;
                 _handle = IntPtr.Zero;
@@ -263,6 +281,8 @@ namespace Rapcha.Win
                 int arc = waveInAddBuffer(_handle, _headers[i], hdrSize);
                 if (prc != 0 || arc != 0) detail += " prepare/add=" + ErrorName(prc) + "/" + ErrorName(arc);
             }
+            _micId = MicTracker.Opened(Owner, "waveIn device " + (deviceId < 0 ? "WAVE_MAPPER (Windows default)" : deviceId.ToString()) + " " + FormatForLog);
+            if (Owner == "voice typing") LastOpen = DateTime.Now.ToString("HH:mm:ss") + " device=" + (deviceId < 0 ? "WAVE_MAPPER (Windows default)" : "#" + deviceId) + " requested 16000Hz/1ch/s16 first; opened " + FormatForLog + "; attempts [" + OpenAttempts + "]";
             rc = waveInStart(_handle);
             if (rc != 0)
             {
@@ -293,6 +313,8 @@ namespace Rapcha.Win
             _sawNonZero = false;
             BuffersReturned = 0;
             EmptyBuffers = 0;
+            QueueFull = 0; ResamplerIn = 0; ResamplerOut = 0;
+            _second.Clear(); _secondIndex = 0; _lostAtLastSecond = 0; _queueFullAtLastSecond = 0;
             MaxPeak = 0;
             FinalLostMs = 0;
         }
@@ -363,10 +385,12 @@ namespace Rapcha.Win
                         }
                         break;
                     }
+                    int doneNow = 0;
                     while (true)
                     {
                         var hdr = (WAVEHDR)Marshal.PtrToStructure(_headers[next], typeof(WAVEHDR));
                         if ((hdr.dwFlags & WHDR_DONE) == 0) break;
+                        if (++doneNow == BufferCount) QueueFull++;
                         BuffersReturned++;
                         if (hdr.dwBytesRecorded > 0) Deliver(hdr, copy); else EmptyBuffers++;
                         hdr.dwBytesRecorded = 0;
@@ -401,6 +425,9 @@ namespace Rapcha.Win
                 Interlocked.Exchange(ref _firstAudioTicks, DateTime.UtcNow.Ticks - TimeSpan.TicksPerSecond * n / Math.Max(1, _bytesPerSecond));
             Interlocked.Add(ref _bytesCaptured, n);
             var pcm16k = _resampler.Process(copy, n);
+            ResamplerIn += n / Math.Max(1, _resampler.FrameBytes);
+            ResamplerOut += pcm16k.Length / 2;
+            if (_diag) SecondStats(pcm16k);
             if (pcm16k.Length == 0) return;
             if (!_sawNonZero)
             {
@@ -422,8 +449,24 @@ namespace Rapcha.Win
             _rechunker.Write(pcm16k, 0, pcm16k.Length);
         }
 
+        /// <summary>v19: one Diagnostics line per second of audio: levels, clipping, speech, missing audio, full queues, resampler counts.</summary>
+        private void SecondStats(byte[] pcm16k)
+        {
+            for (int i = 0; i + 1 < pcm16k.Length; i += 2) _second.Add((short)(pcm16k[i] | (pcm16k[i + 1] << 8)));
+            if (_second.Count < 16000) return;
+            var st = AudioStats.Of(_second.ToArray());
+            _second.Clear();
+            double lost = LostMs;
+            DiagLog.Add("audio", Owner + " second " + (++_secondIndex) + ": " + st + string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                " lost_ms={0:0} (+{1:0}) queue_full={2} (+{3}) resampler_in={4} out={5} buffers={6} empty={7}",
+                lost, Math.Max(0, lost - _lostAtLastSecond), QueueFull, QueueFull - _queueFullAtLastSecond, ResamplerIn, ResamplerOut, BuffersReturned, EmptyBuffers));
+            _lostAtLastSecond = lost;
+            _queueFullAtLastSecond = QueueFull;
+        }
+
         private void Cleanup()
         {
+            if (_micId != 0) { MicTracker.Closed(_micId, "bytes=" + BytesCaptured + " lost_ms=" + ((int)FinalLostMs) + " queue_full=" + QueueFull); _micId = 0; }
             if (_handle != IntPtr.Zero)
             {
                 int hdrSize = Marshal.SizeOf(typeof(WAVEHDR));

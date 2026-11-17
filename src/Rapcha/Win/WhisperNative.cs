@@ -27,6 +27,8 @@ namespace Rapcha.Win
         [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)] private delegate IntPtr LoadFn([MarshalAs(UnmanagedType.LPWStr)] string path, int threads);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int TranscribeFn(IntPtr ctx, float[] samples, int n, int threads, byte[] prompt, byte[] lang, byte[] output, int cap);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void FreeFn(IntPtr ctx);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int StatsFn([Out] float[] output, int cap);
+        private static StatsFn _stats;
 
         private static readonly object Gate = new object();
         private static IntPtr _module;
@@ -101,6 +103,7 @@ namespace Rapcha.Win
                     _transcribe = Fn<TranscribeFn>("rw_transcribe");
                     _free = Fn<FreeFn>("rw_free");
                     _info = Fn<InfoFn>("rw_system_info");
+                    _stats = Fn<StatsFn>("rw_stats");   // v19 diagnostics (optional)
                     var version = Fn<VersionFn>("rw_version");
                     if (_load == null || _transcribe == null || _free == null || version == null || version() != 1)
                     {
@@ -155,6 +158,24 @@ namespace Rapcha.Win
                 if (need < 0) return "";
             }
             return Encoding.UTF8.GetString(buf, 0, Math.Min(need, buf.Length - 1));
+        }
+
+        /// <summary>v19: per segment of the last Transcribe (same thread): no-speech prob, avg log-prob, tokens, kept, t0, t1 (cs).</summary>
+        public struct Segment { public float NoSpeech, AvgLogProb; public int Tokens; public bool Kept; public float T0, T1; }
+
+        public static Segment[] LastSegments()
+        {
+            if (_stats == null) return null;
+            try
+            {
+                var buf = new float[64 * 6];
+                int n = Math.Min(64, _stats(buf, buf.Length));
+                var o = new Segment[Math.Max(0, n)];
+                for (int i = 0; i < o.Length; i++)
+                    o[i] = new Segment { NoSpeech = buf[i * 6], AvgLogProb = buf[i * 6 + 1], Tokens = (int)buf[i * 6 + 2], Kept = buf[i * 6 + 3] > 0.5f, T0 = buf[i * 6 + 4], T1 = buf[i * 6 + 5] };
+                return o;
+            }
+            catch { return null; }
         }
 
         public static void FreeModel(IntPtr ctx) { if (ctx != IntPtr.Zero && _free != null) _free(ctx); }

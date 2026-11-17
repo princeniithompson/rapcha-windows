@@ -166,6 +166,8 @@ namespace Rapcha.Win
 
         /// <summary>v18: built-in speech listens to the Windows default microphone itself (true) or to Rapcha's audio (false).</summary>
         public bool OwnMicrophone { get; private set; }
+        private int _micId;
+        private void ReleaseMic(string why) { if (_micId != 0) { MicTracker.Closed(_micId, why); _micId = 0; } }
         private readonly SpeechGain _gain = new SpeechGain();
         private readonly Dictionary<string, int> _problems = new Dictionary<string, int>();
         private int _maxLevel;
@@ -198,25 +200,56 @@ namespace Rapcha.Win
             }
             if (useDefaultMicrophone)
             {
-                try { _engine.SetInputToDefaultAudioDevice(); OwnMicrophone = true; }
+                try { _engine.SetInputToDefaultAudioDevice(); OwnMicrophone = true; _micId = MicTracker.Opened("built-in recognizer", "SetInputToDefaultAudioDevice"); }
                 catch (Exception e) { AppStorage.Log("Built-in speech: default microphone refused (" + e.GetType().Name + "), using Rapcha's audio"); }
             }
             if (!OwnMicrophone)
                 _engine.SetInputToAudioStream(_stream, new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
-            _engine.AudioSignalProblemOccurred += (s, e) => { lock (_problems) { var k = e.AudioSignalProblem.ToString(); _problems[k] = (_problems.TryGetValue(k, out var n) ? n : 0) + 1; } };
+            _engine.AudioSignalProblemOccurred += (s, e) =>
+            {
+                lock (_problems) { var k = e.AudioSignalProblem.ToString(); _problems[k] = (_problems.TryGetValue(k, out var n) ? n : 0) + 1; }
+                try { DiagLog.Add("engine", "built-in signal problem: " + e.AudioSignalProblem + " at " + e.AudioPosition.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms (level " + e.AudioLevel + ")"); } catch { }
+            };
             _engine.AudioLevelUpdated += (s, e) => { if (e.AudioLevel > _maxLevel) _maxLevel = e.AudioLevel; };
             _engine.SpeechRecognized += (s, e) =>
             {
                 lock (_parts) { _parts.Add(e.Result.Text); _hypothesis = ""; _recognized++; }
+                try
+                {
+                    var a = e.Result.Audio;
+                    DiagLog.Add("engine", string.Format(CultureInfo.InvariantCulture, "built-in phrase {0}: {1}-{2} ms confidence={3:0.00} alternates={4} grammar={5} words={6}",
+                        _recognized, a != null ? a.AudioPosition.TotalMilliseconds : -1, a != null ? (a.AudioPosition + a.Duration).TotalMilliseconds : -1,
+                        e.Result.Confidence, e.Result.Alternates?.Count ?? 0, e.Result.Grammar?.Name ?? "?", e.Result.Words?.Count ?? 0));
+                    if (DiagLog.IncludeText)
+                    {
+                        DiagLog.Words("built-in phrase " + _recognized, e.Result.Text);
+                        int k = 0;
+                        foreach (var alt in e.Result.Alternates ?? new System.Collections.ObjectModel.ReadOnlyCollection<RecognizedPhrase>(new List<RecognizedPhrase>()))
+                            if (k++ < 3) DiagLog.Words("  alternate " + k + " (" + alt.Confidence.ToString("0.00", CultureInfo.InvariantCulture) + ")", alt.Text);
+                    }
+                }
+                catch { }
                 Raise();
+            };
+            _engine.SpeechRecognitionRejected += (s, e) =>
+            {
+                try { DiagLog.Add("engine", "built-in rejected: confidence=" + e.Result.Confidence.ToString("0.00", CultureInfo.InvariantCulture) + " alternates=" + (e.Result.Alternates?.Count ?? 0)); } catch { }
             };
             _engine.SpeechHypothesized += (s, e) =>
             {
                 lock (_parts) { _hypothesis = e.Result.Text; _hypotheses++; }
                 Raise();
             };
-            _engine.RecognizeCompleted += (s, e) => _completed.TrySetResult(true);
+            _engine.RecognizeCompleted += (s, e) => { ReleaseMic("recognition completed"); _completed.TrySetResult(true); };
             _engine.RecognizeAsync(RecognizeMode.Multiple);
+            DiagLog.Add("engine", "built-in started: recognizer=" + info.Culture.Name + " input=" + (OwnMicrophone ? "windows_default_mic" : "rapcha_audio") + " grammars=" +
+                        string.Join(",", _engine.Grammars.Select(g => g.Name + "(w" + g.Weight.ToString("0.0", CultureInfo.InvariantCulture) + ")")) +
+                        (OwnMicrophone ? " format=" + DescribeFormat(_engine.AudioFormat) : ""));
+        }
+
+        private static string DescribeFormat(SpeechAudioFormatInfo f)
+        {
+            try { return f == null ? "?" : f.SamplesPerSecond + "Hz/" + f.ChannelCount + "ch/" + f.BitsPerSample + "bit/" + f.EncodingFormat; } catch { return "?"; }
         }
 
         private string Text(bool withHypothesis)
@@ -254,7 +287,10 @@ namespace Rapcha.Win
             _disposed = true;
             _stream.Complete();
             try { _engine.RecognizeAsyncCancel(); } catch { }
+            try { _engine.SetInputToNull(); } catch { }   // v19: let go of the microphone explicitly
             try { _engine.Dispose(); } catch { }
+            ReleaseMic("disposed");
+            DiagLog.Add("engine", "built-in stopped: " + Summary);
         }
     }
 
@@ -303,6 +339,7 @@ namespace Rapcha.Win
                 var ctx = WhisperNative.LoadModel(path, _threads);
                 LoadMs = sw.ElapsedMilliseconds;
                 if (ctx == IntPtr.Zero) LoadFailed = true;
+                DiagLog.Add("engine", "whisper model " + model.Id + (ctx == IntPtr.Zero ? " FAILED to load" : " loaded") + " in " + LoadMs + " ms, threads=" + _threads + " vocabulary_terms=" + terms.Count);
                 return ctx;
             });
         }
@@ -320,22 +357,36 @@ namespace Rapcha.Win
             }
         }
 
+        private long _nextStart;   // where the next piece starts in the dictation (samples)
+        private int _queued;
+
         private void Queue(short[] piece)
         {
-            _work = _work.ContinueWith(_ => Transcribe(piece), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+            long start = _nextStart;
+            int index = ++_queued;
+            _nextStart = start + piece.Length - Math.Min(piece.Length, OverlapMs * 16);
+            _work = _work.ContinueWith(_ => Transcribe(piece, index, start), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         }
 
         private static readonly Regex Noise = new Regex(@"\[[^\]]*\]|\((?:[^)]*(?:music|silence|blank|applause|laugh|noise|inaudible)[^)]*)\)|\*[^*]*\*", RegexOptions.IgnoreCase);
 
-        private void Transcribe(short[] piece)
+        private void Transcribe(short[] piece, int index, long startSample)
         {
             if (_disposed) return;
             var ctx = _model.Result;
-            if (ctx == IntPtr.Zero) return;
+            if (ctx == IntPtr.Zero) { DiagLog.Warn("whisper piece " + index + ": model not loaded, piece dropped"); return; }
+            string where = "whisper piece " + index + " " + (startSample / 16).ToString(CultureInfo.InvariantCulture) + "-" + ((startSample + piece.Length) / 16).ToString(CultureInfo.InvariantCulture) + " ms";
+            var astats = AudioStats.Of(piece);
             // v18: only the speech goes to Whisper. A piece with no speech (silence, hum, a fan) makes Whisper invent
             // words ("Thank you.", "99 V. Lanes"), so it is skipped; quiet speech is brought up to a normal level.
             var speech = SpeechVad.Trim(piece, out var vad);
-            if (speech == null) { _skipped++; return; }
+            if (speech == null)
+            {
+                _skipped++;
+                DiagLog.Add("engine", where + ": " + astats + " -> skipped (no speech; noise " + AudioStats.Db(vad.NoiseRms).ToString("0", CultureInfo.InvariantCulture) + " dBFS, threshold " + AudioStats.Db(vad.Threshold).ToString("0", CultureInfo.InvariantCulture) + " dBFS)");
+                return;
+            }
+            int trimmed = speech.Length;
             speech = SpeechVad.Normalize(speech, vad.SpeechRms, out var gain);
             if (gain > _maxGain) _maxGain = gain;
             speech = SpeechVad.PadForWhisper(speech);
@@ -346,12 +397,22 @@ namespace Rapcha.Win
             _transcribeMs += sw.ElapsedMilliseconds;
             text = Regex.Replace(Noise.Replace(text ?? "", " "), @"\s+", " ").Trim();
             _pieces++;
-            if (WhisperText.IsLikelyInvention(text, vad.SpeechSeconds)) { if (text.Length > 0) _inventions++; return; }
+            var segs = WhisperNative.LastSegments();
+            string segText = segs == null ? "segments=n/a" : "segments=" + segs.Length + (segs.Length == 0 ? "" : " [" + string.Join(" | ", segs.Select(g => string.Format(CultureInfo.InvariantCulture,
+                "{0:0.00}-{1:0.00}s no_speech={2:0.00} avg_logprob={3:0.00} tokens={4}{5}", g.T0 / 100, g.T1 / 100, g.NoSpeech, g.AvgLogProb, g.Tokens, g.Kept ? "" : " DROPPED(no_speech)"))) + "]");
+            bool invention = WhisperText.IsLikelyInvention(text, vad.SpeechSeconds);
+            string head = where + ": " + astats + " vad_speech_s=" + vad.SpeechSeconds.ToString("0.00", CultureInfo.InvariantCulture) + " sent_samples=" + speech.Length + " (trimmed " + trimmed +
+                          ") gain=" + gain.ToString("0.0", CultureInfo.InvariantCulture) + " transcribe_ms=" + sw.ElapsedMilliseconds + " words=" + TextStats.WordCount(text) +
+                          " compression=" + TextStats.CompressionRatio(text).ToString("0.00", CultureInfo.InvariantCulture) + " temperature=n/a(whisper.cpp does not report the fallback) " + segText;
+            DiagLog.Words(where + " raw", text);
+            if (invention) { if (text.Length > 0) _inventions++; DiagLog.Add("engine", head + " -> hallucination filter: dropped"); return; }
             string all;
             lock (_parts)
             {
                 var prev = _parts.Count > 0 ? _parts[_parts.Count - 1] : "";
+                int before = TextStats.WordCount(text);
                 text = WhisperText.Dedupe(prev, text);   // the 1 s overlap with the previous piece
+                DiagLog.Add("engine", head + " dedupe_removed=" + (before - TextStats.WordCount(text)));
                 if (text.Length == 0) return;
                 _parts.Add(text);
                 all = string.Join(" ", _parts);
@@ -384,6 +445,7 @@ namespace Rapcha.Win
                 _freed = true;
             }
             try { var ctx = _model.Result; if (ctx != IntPtr.Zero) WhisperNative.FreeModel(ctx); } catch { }
+            DiagLog.Add("engine", "whisper model freed: " + Summary);
         }
 
         public void Dispose()

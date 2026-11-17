@@ -7,7 +7,7 @@ namespace Rapcha.Win
 {
     /// <summary>
     /// The "Snooze" drop target (v17): a clean vector circle with a crescent moon and the word "Snooze", shown in
-    /// the middle of the screen after the ring has been held still there for about 5.5 s. It never takes the mouse
+    /// the middle of the screen after the ring has been held still there for about 3 s. It never takes the mouse
     /// (click-through); the ring is dropped on it. It fills in with the user's colour while the ring is over it.
     /// </summary>
     public sealed class SnoozeCircle : LayeredWindow

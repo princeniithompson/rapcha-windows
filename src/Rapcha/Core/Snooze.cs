@@ -55,13 +55,13 @@ namespace Rapcha.Core
 
     /// <summary>
     /// The hold: the ring is being dragged, sits in the middle area and stays within a few pixels of one spot for
-    /// 5.5 s. Any bigger movement, or leaving the middle, starts the wait again, so a quick drag across the middle can
+    /// 3 s (v19; 5.5 s before). Any bigger movement, or leaving the middle, starts the wait again, so a quick drag across the middle can
     /// never arm it. Once armed it stays armed until the drag ends (the user then moves onto the circle).
     /// </summary>
     public sealed class SnoozeHold
     {
-        public const int HoldMs = 5500;
-        public const int ToleranceDip = 6;
+        public const int HoldMs = 3000;   // v19: 3 s (was 5.5 s)
+        public const int ToleranceDip = 10;   // v19: 10 px at 100% (scaled by DPI), measured from where the hold began, so hand jitter never restarts it
 
         private readonly int _tolerance;
         private bool _holding;

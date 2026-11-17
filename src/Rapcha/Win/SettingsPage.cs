@@ -62,7 +62,13 @@ namespace Rapcha.Win
         private DateTime _meterStarted;
         private bool _meterPaused;
         private bool _pageShown;
+        private bool _windowActive = true;
         private float _lastLevel;
+        private readonly PillButton _checkLevel = new PillButton { Primary = true };
+        internal PillButton CheckLevelButton => _checkLevel;
+        /// <summary>v19: the level meter stops by itself after this long (it used to run as long as Settings was open, which kept the microphone in use).</summary>
+        public const int MeterMaxSeconds = 30;
+        internal bool MeterRunning => _meter != null;
 
         public event Action Saved;
         public GlowPicker Glow => _glow;
@@ -101,7 +107,7 @@ namespace Rapcha.Win
             _mic.SelectedIndexChanged += (s, e) =>
             {
                 AppStorage.SaveMicDevice(_mic.SelectedIndex <= 0 ? "" : (string)_mic.SelectedItem);
-                RestartMeter();
+                if (_meter != null) RestartMeter();
             };
             _level.Dock = DockStyle.Fill;
             _level.Height = 18;
@@ -110,7 +116,10 @@ namespace Rapcha.Win
             _micStatus.AutoSize = true;
             _micStatus.BackColor = Color.Transparent;
             _micStatus.MaximumSize = new Size(700, 0);
-            _micStatus.Text = "Say something: the bar should move when you talk.";
+            _micStatus.Text = IdleMeterText;
+            _checkLevel.Text = "Check level";
+            _checkLevel.AutoSize = true;
+            _checkLevel.Click += (s, e) => { if (_meter != null) StopMeter("you pressed Stop"); else RestartMeter(); };
             _micSettings.Text = "Open microphone settings";
             _micSettings.Click += (s, e) => OpenMicrophoneSettings();
             _meterCheck.Tick += (s, e) => CheckMeter();
@@ -162,10 +171,9 @@ namespace Rapcha.Win
             _layout.Controls.Add(Card("Gemini API key",
                 Help("Paste your key from aistudio.google.com/apikey. It is saved encrypted on this PC only."),
                 _key, _show, Row(_save), _status));
-            _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_micSettings)));
+            _layout.Controls.Add(Card("Microphone", _mic, _level, _micStatus, Row(_checkLevel, _micSettings)));
             _layout.Controls.Add(_micTest.Card);
-            _micTest.Starting += StopMeter;            // one recording at a time
-            _micTest.Finished += () => { if (!_meterPaused && _pageShown && !IsDisposed) RestartMeter(); };
+            _micTest.Starting += () => StopMeter("Test microphone started");            // one recording at a time
             _layout.Controls.Add(_offlineCard.Card);
             _layout.Controls.Add(Card("Glow colour",
                 Help("Applies to the ring glow, the words box, the text-box outline and the select-to-speak screen glow."),
@@ -201,18 +209,30 @@ namespace Rapcha.Win
             return f;
         }
 
-        /// <summary>Called when the page is shown or hidden in the main window: the mic test only runs while you can see it.</summary>
+        private const string IdleMeterText = "Press Check level, then say something: the bar should move when you talk. It stops by itself after 30 seconds.";
+
+        /// <summary>
+        /// Called when the page is shown or hidden in the main window. v19: showing the page no longer opens the microphone
+        /// (that kept Windows' "microphone in use" sign on all the time); hiding it always closes the meter.
+        /// </summary>
         public void SetPageShown(bool shown)
         {
             _pageShown = shown;
-            if (shown) RestartMeter(); else StopMeter();
+            if (!shown) StopMeter("Settings page hidden");
+        }
+
+        /// <summary>v19: the main window lost focus or was minimised: the meter closes the microphone.</summary>
+        public void SetWindowActive(bool active)
+        {
+            _windowActive = active;
+            if (!active) StopMeter("main window not active");
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                StopMeter();
+                StopMeter("closing");
                 _meterCheck.Dispose();
                 try { _preview?.Dispose(); } catch { }
                 if (!_voiceLocked) { VoiceSettings.Override = null; AppStorage.Log("Settings: select to speak edit closed without Done (not saved)"); }
@@ -386,24 +406,25 @@ namespace Rapcha.Win
         }
 
         /// <summary>The ring is about to record: free the microphone.</summary>
-        public void PauseMeter() { _meterPaused = true; StopMeter(); }
+        public void PauseMeter() { _meterPaused = true; StopMeter("voice typing started"); }
 
+        /// <summary>v19: voice typing finished. The meter is NOT reopened (it used to be, after every dictation).</summary>
         public void ResumeMeter()
         {
             _meterPaused = false;
-            if (_pageShown && !IsDisposed) RestartMeter();
         }
 
-        private void RestartMeter()
+        /// <summary>Opens the level meter (Check level). Only while Settings is on screen and the window is active.</summary>
+        internal void RestartMeter()
         {
-            StopMeter();
-            if (_meterPaused || !_pageShown || IsDisposed) return;
+            StopMeter(null);
+            if (_meterPaused || !_pageShown || !_windowActive || IsDisposed) return;
             int device = WaveInRecorder.ResolveDevice(_mic.SelectedIndex <= 0 ? "" : (string)_mic.SelectedItem);
             _meter = new WaveInRecorder(_ => { }, level =>
             {
                 _lastLevel = level;
                 try { BeginInvoke(new Action(() => { if (!IsDisposed) _level.Value = Math.Max(0, Math.Min(100, (int)(level * 100))); })); } catch { }
-            });
+            }, "Settings level meter");
             var problem = _meter.Start(device, out var detail);
             AppStorage.Log("Mic meter: device " + _meter.FormatForLog + " result=" + problem + " attempts=[" + _meter.OpenAttempts + "] " + detail);
             if (problem != MicProblem.None)
@@ -414,15 +435,24 @@ namespace Rapcha.Win
             }
             _meterStarted = DateTime.UtcNow;
             SetMicStatus("Say something: the bar should move when you talk.", false);
+            _checkLevel.Text = "Stop";
             _meterCheck.Start();
         }
 
-        private void StopMeter()
+        private void StopMeter() => StopMeter(null);
+
+        private void StopMeter(string why)
         {
             _meterCheck.Stop();
             var m = _meter;
             _meter = null;
-            if (m != null) Task.Run(() => m.Abort());
+            if (m != null)
+            {
+                AppStorage.Log("Mic meter stopped: " + (why ?? "restart"));
+                Task.Run(() => m.Abort());
+                if (why != null && !IsDisposed) SetMicStatus(IdleMeterText, false);
+            }
+            if (!IsDisposed) _checkLevel.Text = "Check level";
             if (!IsDisposed && _level.IsHandleCreated) _level.Value = 0;
         }
 
@@ -430,6 +460,7 @@ namespace Rapcha.Win
         {
             var m = _meter;
             if (m == null) return;
+            if ((DateTime.UtcNow - _meterStarted).TotalSeconds >= MeterMaxSeconds) { StopMeter("30 seconds passed"); return; }
             if ((DateTime.UtcNow - _meterStarted).TotalSeconds < 1.5) return;
             if (m.BytesCaptured == 0)
                 SetMicStatus("No sound is coming from this microphone. " + Messages.MicSteps, true);

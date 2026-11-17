@@ -37,10 +37,11 @@ namespace Rapcha.Tests
         public void MovingMoreThanTheToleranceStartsAgain()
         {
             var h = new SnoozeHold(6);
-            for (double t = 0; t <= 5000; t += 100) h.Update(true, 960, 520, t);
-            h.Update(true, 980, 520, 5100);                   // moved 20 px
-            for (double t = 5200; t < 5100 + SnoozeHold.HoldMs; t += 100) Assert.False(h.Update(true, 980, 520, t));
-            Assert.True(h.Update(true, 982, 521, 5100 + SnoozeHold.HoldMs));
+            double m = SnoozeHold.HoldMs - 400;   // v19: relative to the (now 3 s) hold
+            for (double t = 0; t < m; t += 100) h.Update(true, 960, 520, t);
+            h.Update(true, 980, 520, m);                      // moved 20 px
+            for (double t = m + 100; t < m + SnoozeHold.HoldMs; t += 100) Assert.False(h.Update(true, 980, 520, t));
+            Assert.True(h.Update(true, 982, 521, m + SnoozeHold.HoldMs));
         }
 
         [Fact]
@@ -65,9 +66,10 @@ namespace Rapcha.Tests
         public void LeavingTheMiddleStartsAgain()
         {
             var h = new SnoozeHold(6);
-            for (double t = 0; t <= 5000; t += 100) h.Update(true, 960, 520, t);
-            h.Update(false, 960, 520, 5100);
-            Assert.False(h.Update(true, 960, 520, 5600));
+            double m = SnoozeHold.HoldMs - 400;   // v19: relative to the (now 3 s) hold
+            for (double t = 0; t < m; t += 100) h.Update(true, 960, 520, t);
+            h.Update(false, 960, 520, m);
+            Assert.False(h.Update(true, 960, 520, SnoozeHold.HoldMs + 100));
             Assert.False(h.Armed);
         }
 

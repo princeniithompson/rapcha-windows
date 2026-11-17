@@ -45,7 +45,7 @@ namespace Rapcha.Win
         public event Action DragStarted;
         public event Action DragEnded;
 
-        // Hold-to-snooze (v17): held still in the middle of the screen for ~5.5 s while dragging shows the Snooze
+        // Hold-to-snooze (v17): held still in the middle of the screen for ~3 s (v19) while dragging shows the Snooze
         // circle; dropping the ring on it raises SnoozeDropped (the ring goes back to its dock and the app hides it).
         private readonly Timer _holdTimer = new Timer { Interval = 100 };
         private readonly SnoozeCircle _circle = new SnoozeCircle();
@@ -56,6 +56,7 @@ namespace Rapcha.Win
         public event Action SnoozeDropped;
         public SnoozeCircle SnoozeTarget => _circle;
         public bool SnoozeArmed => _hold.Armed;
+        internal int HoldTolerancePx => _hold.TolerancePx;
 
         // Resting: after a while with nothing to do the ring shrinks to 60% and dims, still docked at the edge.
         public const double RestScale = 0.6;
