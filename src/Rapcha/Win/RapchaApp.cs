@@ -140,8 +140,8 @@ namespace Rapcha.Win
             _ring.SnoozeDropped += () => Snooze.Start(Snooze.Minutes, "dropped on the Snooze circle");
             Snooze.Changed += ApplySnooze;
             _snoozeTimer.Tick += (s, e) => OnSnoozeTick();
-            _bubble.CompleteClicked += () => { if (_phase == Phase.Recording) _ = FinishAsync(); };
-            _bubble.CancelClicked += () => { if (_phase == Phase.Recording) Cancel("Cancelled"); };
+            _bubble.CompleteClicked += () => { if (_voiceDone != null) _voiceDone.TrySetResult(true); else if (_phase == Phase.Recording) _ = FinishAsync(); };
+            _bubble.CancelClicked += () => { if (_voiceDone != null) _voiceDone.TrySetResult(false); else if (_phase == Phase.Recording) Cancel("Cancelled"); };
             _bubble.FixMicClicked += SettingsPage.OpenMicrophoneSettings;
             _hotkeys.HotkeyPressed += id => { if (id == EscHotkeyId) Cancel("Cancelled"); };
             _watch.Tick += OnWatchTick;
@@ -319,44 +319,62 @@ namespace Rapcha.Win
             return pcm => { var o = agc.Process(pcm); LastSessionAudio.Add(o); engine.Feed(o); };
         }
 
-        private VoiceTypingBox _voiceBox;
+        private VoiceTypingEditor _voiceEditor;
+        private TaskCompletionSource<bool> _voiceDone;
 
         /// <summary>
-        /// v21: offline voice typing goes through Windows Voice Typing (Win + H) into Rapcha's own focused text box, then the
-        /// words are typed into the field you were in with the normal delivery (or copied). Whisper and built-in speech stay
-        /// in the code but are not used for offline typing. Online is unchanged (Gemini).
+        /// v21: offline voice typing goes through Windows Voice Typing (Win + H). The normal bubble opens (same look, Offline
+        /// tag, Cancel / Complete, field outline); its words area becomes a real text box that takes focus, and Win + H types
+        /// into it. Clicking elsewhere, switching apps or a popup never ends it: only Complete or Cancel do. Complete types
+        /// the words into the field you are in (the outline follows the field you click) with the normal delivery, or copies
+        /// them. Whisper and built-in speech stay in the code but are not used for offline typing. Online is unchanged (Gemini).
         /// </summary>
         private async Task StartWindowsVoiceTypingAsync()
         {
-            if (_voiceBox != null) { VoiceTypingBox.ForceForeground(_voiceBox.Handle); return; }
+            if (_voiceEditor != null) { _ = _voiceEditor.FocusAndListenAsync(); return; }
             int number = ++_sessionNumber;
             IntPtr fromOverlay = CloseOverlay();
-            IntPtr prev = Native.GetForegroundWindow();
-            IntPtr target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
+            _target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
             DiagLog.Add("session", "SESSION " + number + " START engine=windows-voice-typing (Win+H, offline)");
-            var box = _voiceBox = new VoiceTypingBox(_ring.Visible ? _ring.Bounds : Rectangle.Empty);
-            string text = null;
+            _bubble.Open(_ring.RingBounds, _ring.Edge, Dpi);
+            _bubble.Offline = true;
+            _field.Start(_target);   // the outline follows the field you click while the bubble is open (Rapcha's own windows are ignored)
+            var done = _voiceDone = new TaskCompletionSource<bool>();
+            var editor = _voiceEditor = new VoiceTypingEditor(_bubble.TextPx);
+            editor.Follow(_bubble.TextScreenRect);
+            _bubble.Editor = editor;
+            string text = "";
+            bool keep = false;
             try
             {
-                bool focused = await box.OpenAsync();
-                DiagLog.Add("session", "SESSION " + number + " voice typing box focused=" + focused);
-                text = await box.Result;
+                await editor.FocusAndListenAsync();
+                keep = await done.Task;
+                text = (await editor.FinishAsync(keep)).Trim();
             }
             catch (Exception e) { AppStorage.Log("[s" + number + "] voice typing failed " + e.GetType().Name); }
-            finally { _voiceBox = null; }
-            text = (text ?? "").Trim();
-            DiagLog.Add("session", "SESSION " + number + " END engine=windows-voice-typing result_words=" + TextStats.WordCount(text));
+            finally
+            {
+                _bubble.Editor = null;
+                _voiceEditor = null; _voiceDone = null;
+                try { editor.Close(); editor.Dispose(); } catch { }
+            }
+            DiagLog.Add("session", "SESSION " + number + " END engine=windows-voice-typing " + (keep ? "complete" : "cancelled") + " result_words=" + TextStats.WordCount(text));
             DiagLog.Words("session " + number + " final", text);
-            if (prev != IntPtr.Zero) VoiceTypingBox.ForceForeground(prev);
-            if (text.Length == 0) return;
+            var target = _field.HasField == true ? _field.Target : _field.HasField == false ? IntPtr.Zero : _target;
+            var top = target != IntPtr.Zero ? Native.GetAncestor(target, Native.GA_ROOT) : IntPtr.Zero;
+            if (top != IntPtr.Zero) VoiceTypingEditor.ForceForeground(top);
+            if (!keep || text.Length == 0) { _field.Hide(); _bubble.Close2(); return; }
             await Task.Delay(200);
-            var result = TextDelivery.Deliver(text, target);
+            _bubble.Set(WordsBubble.Mode.Final, text);
+            TextDelivery.Result result;
+            try { result = TextDelivery.Deliver(text, target); }
+            finally { _field.Hide(); }
             AppStorage.Log("[s" + number + "] delivered: " + result);
             if (result == TextDelivery.Result.Typed || result == TextDelivery.Result.Copied) AppStorage.AddToHistory(text);
             _bubble.Set(result == TextDelivery.Result.Failed ? WordsBubble.Mode.Warning : WordsBubble.Mode.Done,
                         result == TextDelivery.Result.Typed ? "Typed ✓" : result == TextDelivery.Result.Copied ? "Copied ✓  Press Ctrl+V to paste" : "Couldn't use the clipboard. Try again.");
             await Task.Delay(1500);
-            if (_phase == Phase.Idle) _bubble.Close2();
+            if (_phase == Phase.Idle && _voiceEditor == null) _bubble.Close2();
         }
 
         private void StartRecording(string trigger = "other")
@@ -854,6 +872,7 @@ namespace Rapcha.Win
             // Search are in a higher Windows band; nothing a normal app does can put a window over them.)
             _ring.KeepOnTop();
             if (_bubble.Visible) _bubble.KeepOnTop();
+            _voiceEditor?.Raise();
             if (_label.Visible) _label.KeepOnTop();
             CheckStartMenu(true);
             if (_phase == Phase.Recording && _field.Tracking) _ = _field.CheckNowAsync();   // e.g. focus went into the Start search box

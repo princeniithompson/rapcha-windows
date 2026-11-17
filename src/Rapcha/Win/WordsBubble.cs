@@ -125,6 +125,16 @@ namespace Rapcha.Win
 
         public void Close2() { _anim.Stop(); Hide(); }
 
+        /// <summary>v21: the editable words box for offline Windows voice typing (null otherwise). It follows the bubble.</summary>
+        public VoiceTypingEditor Editor
+        {
+            get => _editor;
+            set { _editor = value; _p.EditorMode = value != null; Render(); }
+        }
+        private VoiceTypingEditor _editor;
+        public Rectangle TextScreenRect => new Rectangle(_x + _p.TextRect.X, _y + _p.TextRect.Y, _p.TextRect.Width, _p.TextRect.Height);
+        public float TextPx => _p.TextPx;
+
         private int S(int dip) => (int)Math.Round(dip * _dpi / 96.0);
 
         private void Render()
@@ -132,6 +142,7 @@ namespace Rapcha.Win
             if (IsDisposed || _w <= 0) return;
             using (var bmp = _p.Render())
                 Present(bmp, _x, _y);
+            if (_editor != null && !_editor.IsDisposed) _editor.Follow(TextScreenRect);
         }
 
         private bool OnButton(Point p) => _p.CancelRect.Contains(p) || _p.CompleteRect.Contains(p) || _p.FixRect.Contains(p);

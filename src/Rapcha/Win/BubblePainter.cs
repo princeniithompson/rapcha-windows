@@ -23,6 +23,10 @@ namespace Rapcha.Win
         public string Timer = "";
         public bool TimerCountdown;
         public bool Offline;
+        /// <summary>v21: offline Windows voice typing - a real text box sits over the words area, so it is left empty here.</summary>
+        public bool EditorMode;
+        public float TextPx => Layout.TextPx;
+        public static Color CardColor => Accent.Mix(Color.FromArgb(24, 27, 24), Accent.Color, 0.06);
         public Rectangle TimerRect, OfflineRect, TextRect;
         public int LineCount { get; private set; }       // wrapped lines of the current text
         public int VisibleLines { get; private set; }    // lines fully visible in the text area
@@ -129,6 +133,7 @@ namespace Rapcha.Win
                                 using (var b = new SolidBrush(Color.FromArgb(150, 200, 255))) g.DrawString("Fix microphone", link, b, FixRect.X, FixRect.Y);
                             }
                         }
+                        else if (EditorMode) { }
                         else if (Text.Length == 0)
                             DrawLines(g, new List<string> { "Listening… start talking" }, font, Color.FromArgb(170, 176, 166), textRect, 0);
                         else DrawLive(g, font, Color.White, textRect);
