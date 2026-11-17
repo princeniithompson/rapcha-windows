@@ -319,6 +319,46 @@ namespace Rapcha.Win
             return pcm => { var o = agc.Process(pcm); LastSessionAudio.Add(o); engine.Feed(o); };
         }
 
+        private VoiceTypingBox _voiceBox;
+
+        /// <summary>
+        /// v21: offline voice typing goes through Windows Voice Typing (Win + H) into Rapcha's own focused text box, then the
+        /// words are typed into the field you were in with the normal delivery (or copied). Whisper and built-in speech stay
+        /// in the code but are not used for offline typing. Online is unchanged (Gemini).
+        /// </summary>
+        private async Task StartWindowsVoiceTypingAsync()
+        {
+            if (_voiceBox != null) { VoiceTypingBox.ForceForeground(_voiceBox.Handle); return; }
+            int number = ++_sessionNumber;
+            IntPtr fromOverlay = CloseOverlay();
+            IntPtr prev = Native.GetForegroundWindow();
+            IntPtr target = fromOverlay != IntPtr.Zero && TextDelivery.IsUsableTarget(fromOverlay) ? fromOverlay : TextDelivery.CaptureTarget();
+            DiagLog.Add("session", "SESSION " + number + " START engine=windows-voice-typing (Win+H, offline)");
+            var box = _voiceBox = new VoiceTypingBox(_ring.Visible ? _ring.Bounds : Rectangle.Empty);
+            string text = null;
+            try
+            {
+                bool focused = await box.OpenAsync();
+                DiagLog.Add("session", "SESSION " + number + " voice typing box focused=" + focused);
+                text = await box.Result;
+            }
+            catch (Exception e) { AppStorage.Log("[s" + number + "] voice typing failed " + e.GetType().Name); }
+            finally { _voiceBox = null; }
+            text = (text ?? "").Trim();
+            DiagLog.Add("session", "SESSION " + number + " END engine=windows-voice-typing result_words=" + TextStats.WordCount(text));
+            DiagLog.Words("session " + number + " final", text);
+            if (prev != IntPtr.Zero) VoiceTypingBox.ForceForeground(prev);
+            if (text.Length == 0) return;
+            await Task.Delay(200);
+            var result = TextDelivery.Deliver(text, target);
+            AppStorage.Log("[s" + number + "] delivered: " + result);
+            if (result == TextDelivery.Result.Typed || result == TextDelivery.Result.Copied) AppStorage.AddToHistory(text);
+            _bubble.Set(result == TextDelivery.Result.Failed ? WordsBubble.Mode.Warning : WordsBubble.Mode.Done,
+                        result == TextDelivery.Result.Typed ? "Typed ✓" : result == TextDelivery.Result.Copied ? "Copied ✓  Press Ctrl+V to paste" : "Couldn't use the clipboard. Try again.");
+            await Task.Delay(1500);
+            if (_phase == Phase.Idle) _bubble.Close2();
+        }
+
         private void StartRecording(string trigger = "other")
         {
             RecordingStarts++;
@@ -326,6 +366,7 @@ namespace Rapcha.Win
             bool hasKey = !LiveSession.IsPlaceholder(key);
             bool online = Connectivity.LikelyOnline;
             var choice = online ? new EngineChoice { Ok = true, Engine = SpeechEngine.Gemini } : EnginePolicy.ChooseOffline(OfflineEngines.Inputs(false));
+            if (!online && OfflineSettings.Fallback && Connectivity.ForceOffline != true) { _ = StartWindowsVoiceTypingAsync(); return; }   // (self-tests that fake offline keep the old engines)   // v21: offline = Windows voice typing (Win + H)
             if (online && !hasKey)
             {
                 ShowLabel(Messages.NoKey, 4000, true);
