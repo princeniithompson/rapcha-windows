@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src/Rapcha/Assets/engine
-          key: whisper-x86-v1.9.5-${{ hashFiles('native/**') }}
+          key: whisper-x86-v1.9.5-map-${{ hashFiles('native/**') }}
 
       - name: Build the whisper engine (whisper.cpp v1.9.5, one self-contained 32-bit DLL, AVX2 and SSE builds, embedded in Rapcha.exe)
         if: steps.whisper-cache.outputs.cache-hit != 'true'
@@ -56,15 +56,19 @@ jobs:
             $in = [IO.File]::OpenRead($dll.FullName); $fs = [IO.File]::Create((Join-Path (Get-Location) $out))
             $gz = New-Object IO.Compression.GZipStream($fs, [IO.Compression.CompressionLevel]::Optimal)
             $in.CopyTo($gz); $gz.Dispose(); $fs.Dispose(); $in.Dispose()
+            $map = Get-ChildItem $b -Recurse -Filter "rapcha-whisper.map" | Select-Object -First 1
+            if ($map) { Copy-Item $map.FullName (Join-Path $engine ("rapcha-whisper-" + $v.n + ".map")) }   # CI only, not embedded
             "{0}: dll {1:N0} bytes, embedded gz {2:N0} bytes" -f $v.n, $dll.Length, (Get-Item $out).Length
           }
 
-      - name: Whisper CPU safety (no AVX in the SSE build - xed instruction scan, Intel SDE emulating a Goldmont / Celeron N3350, speed)
+      - name: Whisper CPU safety (no AVX in the SSE build - xed instruction scan with the link map, Intel SDE emulating a Goldmont / Celeron N3350, speed)
         shell: powershell
+        timeout-minutes: 30
         run: |
           $ErrorActionPreference = 'Continue'; $ProgressPreference = 'SilentlyContinue'
           $t = Join-Path $env:RUNNER_TEMP "cpu-safety"; New-Item -ItemType Directory -Force $t | Out-Null
           $summary = New-Object System.Collections.Generic.List[string]
+          $fail = New-Object System.Collections.Generic.List[string]
           foreach ($v in 'sse', 'avx2') {
             $in = [IO.File]::OpenRead((Resolve-Path "src/Rapcha/Assets/engine/rapcha-whisper-$v.dll.gz").Path)
             $gz = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
@@ -79,23 +83,46 @@ jobs:
           $sde = (Get-ChildItem $t -Recurse -Filter sde.exe | Select-Object -First 1).FullName
           $xed = Join-Path (Split-Path $sde) "xed.exe"
           "SDE: $sde"
-          # 1) static scan of every instruction in each DLL
+          # 1) static scan: every instruction in each DLL, grouped by the function (from the link map) it belongs to
+          $avxExt = '^(AVX|AVX2|AVX2GATHER|FMA|F16C|BMI2|AVX512.*|AVXAES|VAES|VPCLMULQDQ|AVX_VNNI.*)$'
           foreach ($v in 'sse', 'avx2') {
             $dll = Join-Path $t "rapcha-whisper-$v.dll"
-            $scan = & $xed -i $dll -chip-check GOLDMONT 2>&1 | Out-String
-            $bad = ([regex]::Matches($scan, '(?im)^.*(INVALID|not valid).*$')).Count
-            $hist = & $xed -i $dll -isa-set 2>&1 | Out-String
-            $avxLines = ([regex]::Matches($hist, '(?im)^.*\b(AVX|AVX2|FMA|F16C|BMI2|AVX512)\w*\b.*$')) | ForEach-Object { $_.Value.Trim() }
-            "== xed $v : lines flagged not valid for GOLDMONT: $bad"
-            ($scan -split "`n" | Select-Object -Last 15) -join "`n"
-            "== xed $v : AVX-family ISA sets seen:"; $avxLines | Select-Object -First 25
-            $summary.Add("xed static scan, $v build: $bad instruction lines flagged as not valid for Goldmont; AVX-family ISA-set lines: $(@($avxLines).Count)")
+            $syms = New-Object System.Collections.Generic.List[object]
+            $mapPath = "src/Rapcha/Assets/engine/rapcha-whisper-$v.map"
+            if (Test-Path $mapPath) {
+              foreach ($l in Get-Content $mapPath) {
+                $m = [regex]::Match($l, '^\s*[0-9a-fA-F]{4}:[0-9a-fA-F]{8}\s+(\S+)\s+([0-9a-fA-F]{8})\s+(?:f\s+)?(?:i\s+)?(\S+)\s*$')
+                if ($m.Success) { $syms.Add(@([Convert]::ToUInt32($m.Groups[2].Value, 16), $m.Groups[1].Value, $m.Groups[3].Value)) }
+              }
+              $syms = @($syms | Sort-Object { $_[0] })
+            }
+            "map symbols ($v): $($syms.Count)"
+            $groups = @{}; $count = 0; $total = 0
+            foreach ($l in (& $xed -i $dll -isa-set 2>&1)) {
+              $m = [regex]::Match([string]$l, '^XDIS ([0-9a-f]+): +(\S+) +(\S+) +(\S+)')
+              if (-not $m.Success) { continue }
+              $total++
+              if ($m.Groups[3].Value -notmatch $avxExt) { continue }
+              $count++
+              $a = [Convert]::ToUInt32($m.Groups[1].Value, 16); $owner = "unknown (no map)"
+              if ($syms.Count -gt 0) { $lo = 0; $hi = $syms.Count - 1; $best = -1
+                while ($lo -le $hi) { $mid = [int][Math]::Floor(($lo + $hi) / 2); if ($syms[$mid][0] -le $a) { $best = $mid; $lo = $mid + 1 } else { $hi = $mid - 1 } }
+                if ($best -ge 0) { $owner = $syms[$best][1] + " in " + $syms[$best][2] } }
+              $k = $owner + " [" + $m.Groups[3].Value + "]"; if ($groups.ContainsKey($k)) { $groups[$k]++ } else { $groups[$k] = 1 }
+            }
+            "== xed $v : $total instructions, $count from AVX/AVX2/FMA/F16C/BMI2/AVX-512, by function:"
+            $groups.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 40 | ForEach-Object { "  {0,6}  {1}" -f $_.Value, $_.Key }
+            if ($v -eq 'sse') {
+              $nonCrt = @($groups.Keys | Where-Object { $_ -notmatch ' in (libvcruntime|libucrt|libcmt|libcpmt|msvcrt|vcruntime|ucrt)[^ ]*:' })
+              $summary.Add("Static scan of the SSE build: $total instructions, $count AVX-family instructions; all of them in the Microsoft C runtime (" + (($groups.Keys | ForEach-Object { ($_ -split ' in ')[0] } | Sort-Object -Unique) -join ', ') + "), which only uses them after checking CPUID: " + ($nonCrt.Count -eq 0))
+              if ($nonCrt.Count -gt 0) { $fail.Add("AVX-family instructions outside the C runtime in the SSE build: " + ($nonCrt -join '; ')) }
+            } else { $summary.Add("Static scan of the AVX2 build (for comparison): $count AVX-family instructions") }
           }
           # 2) the bench program and model
           cmake -S native/bench -B (Join-Path $t "bench") -A Win32 | Out-Null
           cmake --build (Join-Path $t "bench") --config Release | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "rw_bench build failed" }
           $bench = (Get-ChildItem (Join-Path $t "bench") -Recurse -Filter rw_bench.exe | Select-Object -First 1).FullName
+          if (-not $bench) { throw "rw_bench build failed" }
           $model = Join-Path $t "ggml-tiny.en.bin"
           Invoke-WebRequest "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin" -OutFile $model
           $mh = (Get-FileHash $model -Algorithm SHA256).Hash.ToLower()
@@ -107,36 +134,51 @@ jobs:
           $syn.SetOutputToWaveFile($wav, $fmt)
           $syn.Speak("The boy is coming. He is coming home from school today. We will meet at the market on Saturday morning.")
           $syn.SetOutputToNull(); $syn.Dispose()
+          function Run-Limited($file, $argList, $name, $seconds) {
+            $o = Join-Path $t "$name.out.txt"; $e = Join-Path $t "$name.err.txt"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath $file -ArgumentList $argList -RedirectStandardOutput $o -RedirectStandardError $e -PassThru -NoNewWindow
+            $null = $p.Handle
+            $timedOut = -not $p.WaitForExit($seconds * 1000)
+            if ($timedOut) { try { Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $p.Id } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } } catch {}; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Get-Process rw_bench -ErrorAction SilentlyContinue | Stop-Process -Force }
+            $sw.Stop()
+            $text = ((Get-Content $o -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $e -Raw -ErrorAction SilentlyContinue))
+            if ($text.Length -gt 6000) { $text = $text.Substring(0, 6000) + "`n...(cut)" }
+            return ,@($(if ($timedOut) { 'timeout' } else { $p.ExitCode }), $text, [int]$sw.Elapsed.TotalSeconds)
+          }
           # 3) native speed on this runner
           foreach ($run in @(@('sse', 2), @('sse', 1), @('avx2', 2))) {
-            $o = & $bench (Join-Path $t "rapcha-whisper-$($run[0]).dll") $model $wav $run[1] 2>&1 | Out-String
-            "== native $($run[0]) threads=$($run[1])"; $o
-            $m = [regex]::Match($o, 'transcribe_ms=(\d+) audio_s=([\d.]+) rtf=([\d.]+)')
-            $summary.Add("native on the runner, $($run[0]) build, $($run[1]) thread(s): " + $m.Value + " text: " + ([regex]::Match($o, 'text: (.*)').Groups[1].Value.Trim()))
+            $r = Run-Limited $bench ('"' + (Join-Path $t "rapcha-whisper-$($run[0]).dll") + '" "' + $model + '" "' + $wav + '" ' + $run[1]) "native-$($run[0])-$($run[1])" 300
+            "== native $($run[0]) threads=$($run[1]) exit=$($r[0])"; $r[1]
+            $m = [regex]::Match($r[1], 'transcribe_ms=(\d+) audio_s=([\d.]+) rtf=([\d.]+)')
+            $summary.Add("Native on the runner, $($run[0]) build, $($run[1]) thread(s): " + $m.Value + " text: " + ([regex]::Match($r[1], 'text: (.*)').Groups[1].Value.Trim()))
           }
-          # 4) the SSE build under Intel SDE pretending to be a Goldmont CPU (Celeron N3350 family): any AVX/AVX2/FMA/F16C/BMI2 instruction is reported
-          function Run-Sde($v, $chk) {
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $o = & $sde -glm -chip_check_die 0 -chip_check_emit_file 1 -chip_check_file $chk -- $bench (Join-Path $t "rapcha-whisper-$v.dll") $model $wav 2 2>&1 | Out-String
-            $code = $LASTEXITCODE; $sw.Stop()
-            $file = if (Test-Path $chk) { Get-Content $chk -Raw } else { "" }
-            $hits = ([regex]::Matches($o + "`n" + $file, '(?i)not valid for specified chip')).Count
-            Write-Host "== SDE -glm $v : exit $code, $hits chip-check reports, $([int]$sw.Elapsed.TotalSeconds) s"; Write-Host $o; Write-Host (($file -split "`n" | Select-Object -First 20) -join "`n")
-            return ,@($code, $hits, $o)
-          }
-          $r = Run-Sde 'sse' (Join-Path $t "chk-sse.txt")
-          $okText = [regex]::Match($r[2], 'text: (.*)').Groups[1].Value.Trim()
-          $summary.Add("Intel SDE emulating Goldmont (-glm), SSE build: exit $($r[0]), instructions not valid for Goldmont: $($r[1]), text: $okText")
-          $n = Run-Sde 'avx2' (Join-Path $t "chk-avx2.txt")
-          $summary.Add("Negative control - AVX2 build under the same Goldmont emulation: instructions not valid for Goldmont: $($n[1]) (must be more than 0)")
+          # 4) the SSE build under Intel SDE pretending to be a Goldmont CPU (Celeron N3350 family). -chip_check_die 1: SDE stops at the
+          #    first instruction the Goldmont does not have and prints it.
+          $chk = Join-Path $t "chk-sse.txt"
+          $r = Run-Limited $sde ('-glm -chip_check_die 1 -chip_check_emit_file 1 -chip_check_file "' + $chk + '" -- "' + $bench + '" "' + (Join-Path $t "rapcha-whisper-sse.dll") + '" "' + $model + '" "' + $wav + '" 2') "sde-sse" 900
+          $chkText = if (Test-Path $chk) { Get-Content $chk -Raw } else { "" }
+          $hits = ([regex]::Matches($r[1] + "`n" + $chkText, '(?i)not valid for specified chip')).Count
+          "== SDE -glm sse: exit $($r[0]) in $($r[2]) s, chip-check reports: $hits"; $r[1]; $chkText
+          $okText = [regex]::Match($r[1], 'text: (.*)').Groups[1].Value.Trim()
+          $rt = [regex]::Match($r[1], 'transcribe_ms=\d+')
+          $summary.Add("Intel SDE emulating Goldmont (-glm, stop at the first instruction it lacks), SSE build, 2 threads: exit $($r[0]) after $($r[2]) s, instructions the Goldmont lacks: $hits, $($rt.Value), text: $okText")
+          if ("$($r[0])" -ne '0' -or $hits -ne 0 -or $okText.Length -lt 20) { $fail.Add("SSE Whisper build did not run cleanly on the emulated Goldmont") }
+          # negative control: the AVX2 build must be stopped at once
+          $chk2 = Join-Path $t "chk-avx2.txt"
+          $n = Run-Limited $sde ('-glm -chip_check_die 1 -chip_check_emit_file 1 -chip_check_file "' + $chk2 + '" -- "' + $bench + '" "' + (Join-Path $t "rapcha-whisper-avx2.dll") + '" "' + $model + '" "' + $wav + '" 2') "sde-avx2" 300
+          $chk2Text = if (Test-Path $chk2) { Get-Content $chk2 -Raw } else { "" }
+          $nhits = ([regex]::Matches($n[1] + "`n" + $chk2Text, '(?i)not valid for specified chip')).Count
+          $first = [regex]::Match($n[1] + "`n" + $chk2Text, '(?im)^.*not valid for specified chip.*$').Value.Trim()
+          "== SDE -glm avx2 (negative control): exit $($n[0]) in $($n[2]) s, reports: $nhits"; $n[1]; $chk2Text
+          $summary.Add("Negative control, AVX2 build under the same Goldmont emulation: exit $($n[0]), stopped: " + ($nhits -gt 0) + " - " + $first)
+          if ($nhits -le 0) { $fail.Add("negative control did not catch the AVX2 build - the SDE check is not working") }
           "## Whisper CPU safety (Celeron N3350 = Goldmont, no AVX)" >> $env:GITHUB_STEP_SUMMARY
           $summary | ForEach-Object { "- $_" } >> $env:GITHUB_STEP_SUMMARY
-          $summary | Set-Content (Join-Path $t "cpu-safety.txt")
           New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "rapcha-shots\v20") | Out-Null
-          Copy-Item (Join-Path $t "cpu-safety.txt") (Join-Path $env:RUNNER_TEMP "rapcha-shots\v20\cpu-safety.txt")
+          $summary | Set-Content (Join-Path $env:RUNNER_TEMP "rapcha-shots\v20\cpu-safety.txt")
           $summary
-          if ($r[0] -ne 0 -or $r[1] -ne 0 -or $okText.Length -lt 20) { throw "SSE Whisper build is NOT safe on Goldmont" }
-          if ($n[1] -le 0) { throw "negative control did not detect AVX2 - the SDE check is not working" }
+          if ($fail.Count -gt 0) { $fail; throw ($fail -join '; ') }
 
       - name: Build Rapcha.exe
         run: dotnet build src/Rapcha/Rapcha.csproj -c Release --nologo -p:RAPCHA_BUILD=${{ github.run_number }}
