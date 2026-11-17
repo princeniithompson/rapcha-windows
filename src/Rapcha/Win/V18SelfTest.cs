@@ -291,12 +291,19 @@ namespace Rapcha.Win
             // Rapcha stopped a dictation by itself; the user's late "stop" tap and a shortcut press arrive.
             _app.Gate.Stopped(true, DateTime.UtcNow);
             _app.Gate.BackToIdle(DateTime.UtcNow);
-            _app.SimulateRingTap();
+            _app.SimulateRingTap();   // (a simulated tap has no tap time, so the select-to-speak guard may take it first; either way no start)
             _app.SimulateShortcut(ShortcutAction.TapToTalk, true);
             await Task.Delay(300);
-            bool noRestart = _app.RecordingStarts == starts && _app.StartsIgnored == ignored + 2;
-            Log("gate: starts_before=" + starts + " after=" + _app.RecordingStarts + " ignored=" + (_app.StartsIgnored - ignored));
-            _notes.Add("After Rapcha stops by itself, a tap on the ring and a shortcut press in the next 3 s do not open a new dictation: " + noRestart);
+            bool noRestart = _app.RecordingStarts == starts && _app.StartsIgnored >= ignored + 1;
+            // A fresh press once the quiet time is over does start (here: no key on the runner, so Settings opens).
+            await Task.Delay(StartGate.AfterAutoStopMs + 200);
+            _app.SimulateShortcut(ShortcutAction.TapToTalk, true);
+            await Task.Delay(500);
+            bool freshWorks = _app.RecordingStarts == starts + 1;
+            _app.CancelForTest();
+            Log("gate: starts_before=" + starts + " after=" + _app.RecordingStarts + " ignored=" + (_app.StartsIgnored - ignored) + " fresh_works=" + freshWorks);
+            _notes.Add("After Rapcha stops by itself, a tap on the ring and a shortcut press in the next 3 s do not open a new dictation: " + noRestart + "; a press after that starts as usual: " + freshWorks);
+            noRestart &= freshWorks;
             return noRestart ? 0 : 115;
         }
 
